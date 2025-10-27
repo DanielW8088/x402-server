@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS mint_queue (
     payment_tx_hash VARCHAR(66),
     authorization_data JSONB,
     tx_hash_bytes32 VARCHAR(66) NOT NULL UNIQUE,
+    token_address VARCHAR(42), -- Token contract address (for multi-token support)
     status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending, processing, completed, failed
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS mint_history (
     payer_address VARCHAR(42) NOT NULL,
     payment_tx_hash VARCHAR(66),
     tx_hash_bytes32 VARCHAR(66) NOT NULL UNIQUE,
+    token_address VARCHAR(42), -- Token contract address (for multi-token support)
     mint_tx_hash VARCHAR(66) NOT NULL,
     amount VARCHAR(78) NOT NULL, -- BigInt as string
     block_number BIGINT,
@@ -57,13 +59,54 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Deployed tokens table - stores all deployed x402 tokens
+CREATE TABLE IF NOT EXISTS deployed_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    address VARCHAR(42) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    deployer_address VARCHAR(42) NOT NULL,
+    mint_amount VARCHAR(78) NOT NULL, -- BigInt as string
+    max_mint_count BIGINT NOT NULL,
+    price VARCHAR(50) NOT NULL, -- e.g., "1 USDC"
+    payment_token_address VARCHAR(42) NOT NULL,
+    payment_token_symbol VARCHAR(20) NOT NULL,
+    pool_manager VARCHAR(42) NOT NULL,
+    position_manager VARCHAR(42) NOT NULL,
+    permit2 VARCHAR(42) NOT NULL,
+    payment_seed VARCHAR(78) NOT NULL,
+    pool_seed_amount VARCHAR(78) NOT NULL,
+    sqrt_price_payment_first VARCHAR(78) NOT NULL,
+    sqrt_price_token_first VARCHAR(78) NOT NULL,
+    network VARCHAR(50) NOT NULL DEFAULT 'base-sepolia',
+    total_supply VARCHAR(78),
+    max_supply VARCHAR(78) NOT NULL,
+    mint_count BIGINT DEFAULT 0,
+    liquidity_deployed BOOLEAN DEFAULT false,
+    verified BOOLEAN DEFAULT false,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    deploy_tx_hash VARCHAR(66),
+    deploy_block_number BIGINT,
+    description TEXT,
+    website_url TEXT,
+    logo_url TEXT,
+    is_active BOOLEAN DEFAULT true
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_mint_queue_status ON mint_queue(status);
 CREATE INDEX IF NOT EXISTS idx_mint_queue_created_at ON mint_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_mint_queue_payer ON mint_queue(payer_address);
+CREATE INDEX IF NOT EXISTS idx_mint_queue_token ON mint_queue(token_address);
 CREATE INDEX IF NOT EXISTS idx_mint_history_payer ON mint_history(payer_address);
 CREATE INDEX IF NOT EXISTS idx_mint_history_created_at ON mint_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_mint_history_token ON mint_history(token_address);
 CREATE INDEX IF NOT EXISTS idx_batch_mints_status ON batch_mints(status);
+CREATE INDEX IF NOT EXISTS idx_deployed_tokens_deployer ON deployed_tokens(deployer_address);
+CREATE INDEX IF NOT EXISTS idx_deployed_tokens_network ON deployed_tokens(network);
+CREATE INDEX IF NOT EXISTS idx_deployed_tokens_created_at ON deployed_tokens(created_at);
+CREATE INDEX IF NOT EXISTS idx_deployed_tokens_active ON deployed_tokens(is_active);
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -77,6 +120,10 @@ $$ language 'plpgsql';
 -- Trigger to auto-update updated_at
 DROP TRIGGER IF EXISTS update_mint_queue_updated_at ON mint_queue;
 CREATE TRIGGER update_mint_queue_updated_at BEFORE UPDATE ON mint_queue
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_deployed_tokens_updated_at ON deployed_tokens;
+CREATE TRIGGER update_deployed_tokens_updated_at BEFORE UPDATE ON deployed_tokens
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- Insert default system settings
