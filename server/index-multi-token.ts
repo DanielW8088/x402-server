@@ -20,7 +20,7 @@ config();
 
 // Environment variables
 const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as `0x${string}`;
-const payTo = process.env.PAY_TO_ADDRESS as `0x${string}`;
+const excessRecipient = process.env.EXCESS_RECIPIENT_ADDRESS as `0x${string}`; // Address to receive excess USDC from LP deployment
 const network = (process.env.NETWORK || "base-sepolia") as "base-sepolia" | "base";
 
 // Database configuration
@@ -28,11 +28,14 @@ const databaseUrl = process.env.DATABASE_URL;
 const useDatabase = !!databaseUrl;
 
 // Validation
-if (!serverPrivateKey || !payTo) {
+if (!serverPrivateKey) {
   console.error("Missing required environment variables:");
   console.error("- SERVER_PRIVATE_KEY");
-  console.error("- PAY_TO_ADDRESS");
   process.exit(1);
+}
+
+if (!excessRecipient) {
+  console.warn("⚠️  EXCESS_RECIPIENT_ADDRESS not set. Excess USDC will be sent to token deployer by default.");
 }
 
 // Setup database pool
@@ -98,6 +101,10 @@ const queueProcessor = new MintQueueProcessor(
   publicClient
 );
 
+// Note: LP deployment is now handled by a separate standalone service
+// See: server/lp-deployer-standalone.ts
+// Run with: npm run lp-deployer
+
 /**
  * Generate a unique transaction hash for minting
  * Uses keccak256 to create a proper 32-byte hash
@@ -130,11 +137,31 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
 
+    // Validate minimum constraints
+    const mintAmountNum = parseFloat(mintAmount);
+    const maxMintCountNum = parseInt(maxMintCount);
+
+    if (mintAmountNum < 1) {
+      return res.status(400).json({
+        error: "Invalid mintAmount",
+        message: "mintAmount must be at least 1",
+      });
+    }
+
+    if (maxMintCountNum < 10) {
+      return res.status(400).json({
+        error: "Invalid maxMintCount",
+        message: "maxMintCount must be at least 10",
+      });
+    }
+
     console.log(`\n🚀 Deploying new token: ${name} (${symbol})`);
     console.log(`   Deployer: ${deployer}`);
     console.log(`   Mint Amount: ${mintAmount} tokens`);
     console.log(`   Max Mints: ${maxMintCount}`);
     console.log(`   Price: ${price} ${paymentToken}`);
+    console.log(`   Excess Recipient: ${excessRecipient || deployer}`);
+    console.log(`   💡 USDC should be sent to the token contract address (will be shown after deployment)`);
 
     const deployConfig: TokenDeployConfig = {
       name,
@@ -145,6 +172,7 @@ app.post("/api/deploy", async (req, res) => {
       paymentToken: paymentToken === 'USDT' ? 'USDT' : 'USDC',
       network,
       deployer,
+      excessRecipient: excessRecipient, // Pass the excess recipient
     };
 
     // Deploy token
@@ -155,6 +183,15 @@ app.post("/api/deploy", async (req, res) => {
     const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
     console.log(`✅ Token saved to database`);
 
+    // Calculate required vs total USDC
+    const pricePerMintUSDC = BigInt(price) * BigInt(10 ** 6);
+    const mintAmountWei = BigInt(mintAmount) * BigInt(10 ** 18);
+    const totalUserMint = mintAmountWei * BigInt(maxMintCount);
+    const poolSeedAmount = totalUserMint / BigInt(4);
+    const requiredUSDC = (poolSeedAmount * pricePerMintUSDC) / mintAmountWei;
+    const totalUSDC = pricePerMintUSDC * BigInt(maxMintCount);
+    const excessUSDC = totalUSDC - requiredUSDC;
+
     return res.status(200).json({
       success: true,
       token: {
@@ -164,6 +201,13 @@ app.post("/api/deploy", async (req, res) => {
         deployTxHash: savedToken.deploy_tx_hash,
         blockNumber: savedToken.deploy_block_number,
         mintUrl: `${req.protocol}://${req.get('host')}/mint/${savedToken.address}`,
+        paymentInfo: {
+          paymentAddress: savedToken.address, // USDC should be sent to token contract
+          requiredUSDC: (Number(requiredUSDC) / 1e6).toFixed(2),
+          totalUSDC: (Number(totalUSDC) / 1e6).toFixed(2),
+          excessUSDC: (Number(excessUSDC) / 1e6).toFixed(2),
+          excessRecipient: excessRecipient || deployer,
+        },
       },
     });
   } catch (error: any) {
@@ -196,22 +240,101 @@ app.get("/api/tokens", async (req, res) => {
       offset: parseInt(offset as string),
     });
 
-    // Format response
-    const formattedTokens = tokens.map(token => ({
-      address: token.address,
-      name: token.name,
-      symbol: token.symbol,
-      deployer: token.deployer_address,
-      mintAmount: token.mint_amount,
-      maxMintCount: token.max_mint_count,
-      mintCount: token.mint_count,
-      price: token.price,
-      paymentToken: token.payment_token_symbol,
-      network: token.network,
-      liquidityDeployed: token.liquidity_deployed,
-      createdAt: token.created_at,
-      mintUrl: `/mint/${token.address}`,
+    // Calculate 24h USDC volume for each token
+    const volumeQuery = await pool.query(`
+      SELECT 
+        token_address,
+        COUNT(*) as mint_count_24h
+      FROM mint_history
+      WHERE completed_at > NOW() - INTERVAL '24 hours'
+      GROUP BY token_address
+    `);
+
+    const volumeMap = new Map<string, number>();
+    volumeQuery.rows.forEach(row => {
+      if (row.token_address) {
+        volumeMap.set(row.token_address.toLowerCase(), parseInt(row.mint_count_24h));
+      }
+    });
+
+    // Fetch live on-chain data for each token
+    const formattedTokens = await Promise.all(tokens.map(async (token) => {
+      try {
+        // Get live mintCount from chain
+        const mintCount = await publicClient.readContract({
+          address: token.address as `0x${string}`,
+          abi: tokenAbi,
+          functionName: "mintCount",
+        });
+
+        // Try to get liquidityDeployed, fall back to DB if not available (old contracts)
+        let liquidityDeployed: boolean;
+        try {
+          liquidityDeployed = await publicClient.readContract({
+            address: token.address as `0x${string}`,
+            abi: tokenAbi,
+            functionName: "liquidityDeployed",
+          }) as boolean;
+        } catch (lpErr) {
+          // Old contract without liquidityDeployed function, use DB value
+          liquidityDeployed = token.liquidity_deployed;
+        }
+
+        // Calculate 24h USDC volume
+        const mintCount24h = token.address ? (volumeMap.get(token.address.toLowerCase()) || 0) : 0;
+        // Extract price number from "1 USDC" format
+        const priceMatch = token.price ? token.price.match(/[\d.]+/) : null;
+        const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 0;
+        const volume24hUSDC = mintCount24h * pricePerMint;
+
+        return {
+          address: token.address,
+          name: token.name,
+          symbol: token.symbol,
+          deployer: token.deployer_address,
+          mintAmount: token.mint_amount,
+          maxMintCount: token.max_mint_count,
+          mintCount: Number(mintCount), // Live data from chain
+          mintCount24h, // Mints in last 24h
+          volume24hUSDC, // USDC volume in last 24h
+          price: token.price,
+          paymentToken: token.payment_token_symbol,
+          network: token.network,
+          liquidityDeployed: liquidityDeployed, // Live or DB data
+          createdAt: token.created_at,
+          mintUrl: `/mint/${token.address}`,
+        };
+      } catch (err) {
+        // Fallback to database data if chain read fails
+        console.error(`⚠️  Using DB data for ${token.address} (chain read failed)`);
+        
+        const mintCount24h = token.address ? (volumeMap.get(token.address.toLowerCase()) || 0) : 0;
+        const priceMatch = token.price ? token.price.match(/[\d.]+/) : null;
+        const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 0;
+        const volume24hUSDC = mintCount24h * pricePerMint;
+
+        return {
+          address: token.address,
+          name: token.name,
+          symbol: token.symbol,
+          deployer: token.deployer_address,
+          mintAmount: token.mint_amount,
+          maxMintCount: token.max_mint_count,
+          mintCount: token.mint_count, // Fallback to DB data
+          mintCount24h,
+          volume24hUSDC,
+          price: token.price,
+          paymentToken: token.payment_token_symbol,
+          network: token.network,
+          liquidityDeployed: token.liquidity_deployed, // Fallback to DB data
+          createdAt: token.created_at,
+          mintUrl: `/mint/${token.address}`,
+        };
+      }
     }));
+
+    // Sort by 24h USDC volume (descending)
+    formattedTokens.sort((a, b) => b.volume24hUSDC - a.volume24hUSDC);
 
     return res.json({
       tokens: formattedTokens,
@@ -298,7 +421,7 @@ app.get("/api/tokens/:address", async (req, res) => {
       price: dbToken?.price || "1 USDC",
       paymentToken: dbToken?.payment_token_symbol || "USDC",
       deployer: dbToken?.deployer_address,
-      payTo: getAddress(payTo),
+      paymentAddress: address, // USDC should be sent to token contract
     });
   } catch (error: any) {
     console.error("❌ Error fetching token info:", error.message);
@@ -543,7 +666,7 @@ app.get("/health", (req, res) => {
   res.json({
     status: "ok",
     network,
-    payTo: getAddress(payTo),
+    excessRecipient: excessRecipient ? getAddress(excessRecipient) : "Not configured",
     database: true,
     queueProcessor: "enabled",
   });
@@ -568,10 +691,11 @@ async function start() {
   app.listen(PORT, () => {
     console.log(`\n🚀 Multi-Token x402 Server running on port ${PORT}`);
     console.log(`Network: ${network}`);
-    console.log(`Pay To Address: ${getAddress(payTo)}`);
+    console.log(`Excess Recipient: ${excessRecipient ? getAddress(excessRecipient) : 'Not configured (will use deployer)'}`);
     console.log(`Server Address: ${account.address}`);
     console.log(`Database: ✅ Enabled`);
     console.log(`Queue System: ✅ Enabled (batch every 10s)`);
+    console.log(`\n💡 LP Deployment: Run standalone service with 'npm run lp-deployer'`);
     console.log(`\nEndpoints:`);
     console.log(`  POST /api/deploy - Deploy new token`);
     console.log(`  GET /api/tokens - List all tokens`);

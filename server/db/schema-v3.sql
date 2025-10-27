@@ -1,4 +1,4 @@
--- Database schema for token mint queue system
+-- Database schema for token mint queue system with Uniswap V3
 -- PostgreSQL 14+
 
 -- Enable UUID extension
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
--- Deployed tokens table - stores all deployed x402 tokens
+-- Deployed tokens table - stores all deployed x402 tokens (V3)
 CREATE TABLE IF NOT EXISTS deployed_tokens (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     address VARCHAR(42) NOT NULL UNIQUE,
@@ -71,13 +71,9 @@ CREATE TABLE IF NOT EXISTS deployed_tokens (
     price VARCHAR(50) NOT NULL, -- e.g., "1 USDC"
     payment_token_address VARCHAR(42) NOT NULL,
     payment_token_symbol VARCHAR(20) NOT NULL,
-    pool_manager VARCHAR(42) NOT NULL,
-    position_manager VARCHAR(42) NOT NULL,
-    permit2 VARCHAR(42) NOT NULL,
+    position_manager VARCHAR(42) NOT NULL, -- V3 NonfungiblePositionManager
     payment_seed VARCHAR(78) NOT NULL,
     pool_seed_amount VARCHAR(78) NOT NULL,
-    sqrt_price_payment_first VARCHAR(78) NOT NULL,
-    sqrt_price_token_first VARCHAR(78) NOT NULL,
     network VARCHAR(50) NOT NULL DEFAULT 'base-sepolia',
     total_supply VARCHAR(78),
     max_supply VARCHAR(78) NOT NULL,
@@ -91,7 +87,15 @@ CREATE TABLE IF NOT EXISTS deployed_tokens (
     description TEXT,
     website_url TEXT,
     logo_url TEXT,
-    is_active BOOLEAN DEFAULT true
+    is_active BOOLEAN DEFAULT true,
+    
+    -- V3 specific fields
+    pool_fee INTEGER DEFAULT 3000, -- 3000 = 0.3%, 500 = 0.05%, 10000 = 1%
+    liquidity_tx_hash VARCHAR(66),
+    liquidity_deployed_at TIMESTAMP,
+    lp_token_id VARCHAR(78), -- V3 NFT position token ID
+    lp_deployment_error TEXT,
+    lp_deployment_error_at TIMESTAMP
 );
 
 -- Indexes for performance
@@ -107,6 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_deployed_tokens_deployer ON deployed_tokens(deplo
 CREATE INDEX IF NOT EXISTS idx_deployed_tokens_network ON deployed_tokens(network);
 CREATE INDEX IF NOT EXISTS idx_deployed_tokens_created_at ON deployed_tokens(created_at);
 CREATE INDEX IF NOT EXISTS idx_deployed_tokens_active ON deployed_tokens(is_active);
+CREATE INDEX IF NOT EXISTS idx_tokens_lp_pending ON deployed_tokens(liquidity_deployed, is_active) 
+    WHERE liquidity_deployed = false AND is_active = true;
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -144,4 +150,10 @@ SELECT
     COUNT(DISTINCT payer_address) FILTER (WHERE status = 'pending') as unique_payers_pending
 FROM mint_queue
 WHERE created_at > NOW() - INTERVAL '24 hours';
+
+-- Comments
+COMMENT ON TABLE deployed_tokens IS 'Deployed tokens using Uniswap V3';
+COMMENT ON COLUMN deployed_tokens.position_manager IS 'Uniswap V3 NonfungiblePositionManager address';
+COMMENT ON COLUMN deployed_tokens.pool_fee IS 'Uniswap V3 pool fee tier (3000 = 0.3%, 500 = 0.05%, 10000 = 1%)';
+COMMENT ON COLUMN deployed_tokens.lp_token_id IS 'Uniswap V3 NFT position token ID';
 

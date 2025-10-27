@@ -11,10 +11,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /**
- * @title PAYX
+ * @title PAYX_V3
  * @notice ERC20 token with x402 payment integration and Uniswap V3 auto-deployment
  */
-contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
+contract PAYX_V3 is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     // ==================== Errors ====================
     
     error ArrayLengthMismatch();
@@ -249,7 +249,7 @@ contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     function deployLiquidityV3(
         int24 tickLower,
         int24 tickUpper,
-        uint160 /* sqrtPriceX96 */
+        uint160 sqrtPriceX96
     ) external onlyRole(DEFAULT_ADMIN_ROLE) returns (uint256 tokenId, uint128 liquidity) {
         require(_mintCount >= MAX_MINT_COUNT, "Max mint count not reached yet");
         require(!_liquidityDeployed, "Liquidity already deployed");
@@ -299,7 +299,7 @@ contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         emit LiquidityDeployed(tokenId, liquidity);
     }
 
-    /// @notice Emergency withdraw before LP deployment (one-time only)
+    /// @notice Emergency withdraw before LP deployment
     function emergencyWithdraw() external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(!_liquidityDeployed, "Liquidity already deployed");
         require(!_emergencyWithdrawUsed, "Emergency withdraw already used");
@@ -309,48 +309,6 @@ contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         if (balance > 0) {
             IERC20(PAYMENT_TOKEN).transfer(msg.sender, balance);
         }
-    }
-
-    /// @notice Withdraw any ERC20 token from the contract
-    /// @param token ERC20 token address to withdraw
-    /// @param amount Amount to withdraw (0 = withdraw all)
-    /// @param recipient Address to receive tokens (address(0) = msg.sender)
-    function withdrawERC20(address token, uint256 amount, address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(token != address(0), "Invalid token address");
-        address to = recipient == address(0) ? msg.sender : recipient;
-        uint256 balance = IERC20(token).balanceOf(address(this));
-        uint256 withdrawAmount = amount == 0 ? balance : amount;
-        
-        require(withdrawAmount > 0, "Nothing to withdraw");
-        require(balance >= withdrawAmount, "Insufficient balance");
-        
-        IERC20(token).transfer(to, withdrawAmount);
-    }
-
-    /// @notice Withdraw USDC (convenience function)
-    /// @param amount Amount of USDC to withdraw (0 = withdraw all)
-    /// @param recipient Address to receive USDC (address(0) = msg.sender)
-    function withdrawUSDC(uint256 amount, address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        address to = recipient == address(0) ? msg.sender : recipient;
-        uint256 balance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
-        uint256 withdrawAmount = amount == 0 ? balance : amount;
-        
-        require(withdrawAmount > 0, "Nothing to withdraw");
-        require(balance >= withdrawAmount, "Insufficient balance");
-        
-        IERC20(PAYMENT_TOKEN).transfer(to, withdrawAmount);
-    }
-
-    /// @notice Check ERC20 token balance in contract
-    /// @param token Token address to check (address(0) = PAYMENT_TOKEN/USDC)
-    function getTokenBalance(address token) external view returns (uint256) {
-        address tokenToCheck = token == address(0) ? PAYMENT_TOKEN : token;
-        return IERC20(tokenToCheck).balanceOf(address(this));
-    }
-
-    /// @notice Check USDC balance in contract (convenience function)
-    function getUSDCBalance() external view returns (uint256) {
-        return IERC20(PAYMENT_TOKEN).balanceOf(address(this));
     }
 
     // ==================== LP Management ====================

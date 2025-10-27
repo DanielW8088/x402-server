@@ -6,15 +6,38 @@ import { Pool } from 'pg';
 
 const execAsync = promisify(exec);
 
+/**
+ * Calculate square root of a BigInt using Newton's method
+ */
+function sqrt(value: bigint): bigint {
+  if (value < 0n) {
+    throw new Error('Square root of negative numbers is not supported');
+  }
+  if (value < 2n) {
+    return value;
+  }
+
+  function newtonIteration(n: bigint, x0: bigint): bigint {
+    const x1 = ((n / x0) + x0) >> 1n;
+    if (x0 === x1 || x0 === (x1 - 1n)) {
+      return x0;
+    }
+    return newtonIteration(n, x1);
+  }
+
+  return newtonIteration(value, 1n);
+}
+
 export interface TokenDeployConfig {
   name: string;
   symbol: string;
-  mintAmount: string; // in tokens (e.g., "10000")
-  maxMintCount: number;
+  mintAmount: string; // in tokens (e.g., "10000"), minimum 1
+  maxMintCount: number; // minimum 10
   price: string; // e.g., "1"
   paymentToken: 'USDC' | 'USDT';
   network: 'base-sepolia' | 'base';
   deployer: string;
+  excessRecipient?: string; // Address to receive excess USDC (defaults to deployer)
 }
 
 interface DeployResult {
@@ -23,24 +46,15 @@ interface DeployResult {
   blockNumber: number;
 }
 
-// Network configurations
+// Network configurations (Simplified)
 const NETWORK_CONFIG: Record<string, {
-  poolManager: string;
-  positionManager: string;
-  permit2: string;
   usdc: string;
   usdt?: string;
 }> = {
   'base-sepolia': {
-    poolManager: '0x7da1d65f8b249183667cde74c5cbd46dd38aa829',
-    positionManager: '0xc01ee65a5087409013202db5e1f77e3b74579abf',
-    permit2: '0x000000000022d473030f116ddee9f6b43ac78ba3',
     usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   },
   'base': {
-    poolManager: '0x', // TODO: Add mainnet addresses
-    positionManager: '0x',
-    permit2: '0x000000000022d473030f116ddee9f6b43ac78ba3',
     usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
   },
 };
@@ -54,23 +68,83 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
     throw new Error(`Unsupported network: ${config.network}`);
   }
 
+  // Validate minimum constraints
+  const mintAmountNum = parseFloat(config.mintAmount);
+  if (mintAmountNum < 1) {
+    throw new Error(`mintAmount must be at least 1, got ${config.mintAmount}`);
+  }
+  if (config.maxMintCount < 10) {
+    throw new Error(`maxMintCount must be at least 10, got ${config.maxMintCount}`);
+  }
+
   // Determine payment token address
   const paymentTokenAddress = config.paymentToken === 'USDC' 
     ? networkConfig.usdc 
     : networkConfig.usdt || networkConfig.usdc;
 
+  // Excess recipient (defaults to deployer if not specified)
+  const excessRecipient = config.excessRecipient || config.deployer;
+
+  // Get LP deployer address from environment
+  const lpDeployerPrivateKey = process.env.LP_DEPLOYER_PRIVATE_KEY as string;
+  if (!lpDeployerPrivateKey) {
+    throw new Error('LP_DEPLOYER_PRIVATE_KEY environment variable required');
+  }
+  
+  // Derive LP deployer address from private key
+  const { privateKeyToAccount } = await import('viem/accounts');
+  const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
+  const lpDeployerAddress = lpAccount.address;
+
+  console.log(`💼 LP Deployer: ${lpDeployerAddress}`);
+
   // Calculate amounts
+  // Total supply calculation:
+  // - User mintable = tokenPerMint * maxMintCount (80% of total supply)
+  // - LP pool reserve = 20% of total supply = (user mintable) / 4
   const mintAmountWei = BigInt(config.mintAmount) * BigInt(10 ** 18);
   const totalUserMint = mintAmountWei * BigInt(config.maxMintCount);
-  const poolSeedAmount = totalUserMint / BigInt(4); // 25% for LP
-  const paymentSeedUSDC = (BigInt(config.price) * BigInt(10 ** 6) * BigInt(config.maxMintCount)) / BigInt(4); // 25% of total revenue
+  const poolSeedAmount = totalUserMint / BigInt(4); // 20% for LP pool (user mint is 80%)
+  
+  // Price per mint in USDC (with 6 decimals)
+  const pricePerMintUSDC = BigInt(config.price) * BigInt(10 ** 6);
+  
+  // Calculate required USDC for LP (based on mint price)
+  // Required = poolSeedAmount * pricePerMint / mintAmount
+  const requiredPaymentForLP = (poolSeedAmount * pricePerMintUSDC) / mintAmountWei;
+  
+  // Total USDC that will be collected from all mints
+  const totalUSDCRevenue = pricePerMintUSDC * BigInt(config.maxMintCount);
+  
+  // Excess USDC that will be sent to excessRecipient
+  const excessUSDC = totalUSDCRevenue - requiredPaymentForLP;
 
-  // Calculate sqrtPrice (simplified calculation - assumes 1:1 ratio)
-  // For production, use the calculateSqrtPrice.js script
-  const sqrtPricePaymentFirst = '7922816251426434139029504';
-  const sqrtPriceTokenFirst = '792281625142643375935439503360000';
+  // Calculate sqrtPrice based on actual token economics
+  // Price per token = pricePerMint / mintAmount
+  // Example: 1 USDC buys 1000 tokens -> 0.001 USDC per token
+  
+  // In wei terms:
+  // 1 token = 1e18 wei
+  // pricePerToken = pricePerMintUSDC (1e6 wei) / mintAmountWei (1e18 wei)
+  // = pricePerMintUSDC * 1e18 / mintAmountWei (in USDC wei per token wei)
+  
+  const pricePerTokenInUSDCWei = (pricePerMintUSDC * BigInt(10 ** 18)) / mintAmountWei;
+  
+  // Scenario 1: USDC is token0, Token is token1
+  // price = token1_wei / token0_wei = 1e18 / pricePerTokenInUSDCWei
+  const price1 = (BigInt(10 ** 18) * BigInt(2 ** 96)) / pricePerTokenInUSDCWei;
+  const sqrtPricePaymentFirst = sqrt(price1).toString();
+  
+  // Scenario 2: Token is token0, USDC is token1  
+  // price = token1_wei / token0_wei = pricePerTokenInUSDCWei / 1e18
+  const price2 = (pricePerTokenInUSDCWei * BigInt(2 ** 96)) / BigInt(10 ** 18);
+  const sqrtPriceTokenFirst = sqrt(price2).toString();
+  
+  console.log(`💡 Calculated sqrtPrices for ${config.price} USDC per ${config.mintAmount} tokens:`);
+  console.log(`   sqrtPricePaymentFirst: ${sqrtPricePaymentFirst}`);
+  console.log(`   sqrtPriceTokenFirst: ${sqrtPriceTokenFirst}`);
 
-  // Generate deployment script
+  // Generate deployment script (Simplified)
   const deployScriptPath = join(__dirname, '../../contracts/scripts/deployToken.js');
   const deployScript = `
 const hre = require("hardhat");
@@ -81,31 +155,26 @@ async function main() {
     const MINT_AMOUNT = "${mintAmountWei.toString()}";
     const MAX_MINT_COUNT = ${config.maxMintCount};
     
-    const POOL_MANAGER = "${networkConfig.poolManager}";
-    const POSITION_MANAGER = "${networkConfig.positionManager}";
-    const PERMIT2 = "${networkConfig.permit2}";
     const PAYMENT_TOKEN = "${paymentTokenAddress}";
-    const PAYMENT_SEED = "${paymentSeedUSDC.toString()}";
+    const PRICE_PER_MINT = "${pricePerMintUSDC.toString()}";
     const POOL_SEED_AMOUNT = "${poolSeedAmount.toString()}";
-    const SQRT_PRICE_PAYMENT_FIRST = "${sqrtPricePaymentFirst}";
-    const SQRT_PRICE_TOKEN_FIRST = "${sqrtPriceTokenFirst}";
+    const EXCESS_RECIPIENT = "${excessRecipient}";
+    const LP_DEPLOYER = "${lpDeployerAddress}";
 
-    console.log("Deploying token:", TOKEN_NAME);
+    console.log("Deploying PAYX_Simple token:", TOKEN_NAME);
+    console.log("LP Deployer:", LP_DEPLOYER);
     
-    const PAYX = await hre.ethers.getContractFactory("PAYX");
+    const PAYX = await hre.ethers.getContractFactory("PAYX_Simple");
     const token = await PAYX.deploy(
         TOKEN_NAME,
         TOKEN_SYMBOL,
         MINT_AMOUNT,
         MAX_MINT_COUNT,
-        POOL_MANAGER,
-        POSITION_MANAGER,
-        PERMIT2,
         PAYMENT_TOKEN,
-        PAYMENT_SEED,
+        PRICE_PER_MINT,
         POOL_SEED_AMOUNT,
-        SQRT_PRICE_PAYMENT_FIRST,
-        SQRT_PRICE_TOKEN_FIRST
+        EXCESS_RECIPIENT,
+        LP_DEPLOYER
     );
 
     await token.waitForDeployment();
@@ -175,24 +244,35 @@ export async function saveDeployedToken(
     ? networkConfig.usdc 
     : networkConfig.usdt || networkConfig.usdc;
 
+  // Get LP deployer address from environment
+  const lpDeployerPrivateKey = process.env.LP_DEPLOYER_PRIVATE_KEY as string;
+  if (!lpDeployerPrivateKey) {
+    throw new Error('LP_DEPLOYER_PRIVATE_KEY environment variable required');
+  }
+  
+  // Derive LP deployer address from private key
+  const { privateKeyToAccount } = await import('viem/accounts');
+  const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
+  const lpDeployerAddress = lpAccount.address;
+
   const mintAmountWei = BigInt(config.mintAmount) * BigInt(10 ** 18);
   const maxSupply = BigInt(2_000_000_000) * BigInt(10 ** 18);
   const totalUserMint = mintAmountWei * BigInt(config.maxMintCount);
   const poolSeedAmount = totalUserMint / BigInt(4);
-  const paymentSeed = (BigInt(config.price) * BigInt(10 ** 6) * BigInt(config.maxMintCount)) / BigInt(4);
+  const pricePerMintUSDC = BigInt(config.price) * BigInt(10 ** 6);
+  const requiredPayment = (poolSeedAmount * pricePerMintUSDC) / mintAmountWei;
 
   const query = `
     INSERT INTO deployed_tokens (
       address, name, symbol, deployer_address,
       mint_amount, max_mint_count, price,
       payment_token_address, payment_token_symbol,
-      pool_manager, position_manager, permit2,
+      lp_deployer_address,
       payment_seed, pool_seed_amount,
-      sqrt_price_payment_first, sqrt_price_token_first,
       network, max_supply, total_supply,
       deploy_tx_hash, deploy_block_number
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
     )
     RETURNING *
   `;
@@ -207,13 +287,9 @@ export async function saveDeployedToken(
     `${config.price} ${config.paymentToken}`,
     paymentTokenAddress.toLowerCase(),
     config.paymentToken,
-    networkConfig.poolManager,
-    networkConfig.positionManager,
-    networkConfig.permit2,
-    paymentSeed.toString(),
+    lpDeployerAddress.toLowerCase(),
+    requiredPayment.toString(),
     poolSeedAmount.toString(),
-    '7922816251426434139029504',
-    '792281625142643375935439503360000',
     config.network,
     maxSupply.toString(),
     poolSeedAmount.toString(), // Initial supply (LP seed)

@@ -260,8 +260,16 @@ export class MintQueueProcessor {
 
       // Get gas price with buffer
       const gasPrice = await this.publicClient.getGasPrice();
-      const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 150n) / 100n : 1000000n;
-
+      console.log(`   Current gas price: ${gasPrice} wei (${Number(gasPrice) / 1e9} gwei)`);
+      
+      // Use 3x buffer with minimum of 0.1 gwei for Base network
+      const minGasPrice = 100000000n; // 0.1 gwei minimum
+      const gasPriceWithBuffer = gasPrice > 0n 
+        ? (gasPrice * 300n) / 100n  // 3x buffer
+        : minGasPrice;
+      const finalGasPrice = gasPriceWithBuffer > minGasPrice ? gasPriceWithBuffer : minGasPrice;
+      
+      console.log(`   Using gas price: ${finalGasPrice} wei (${Number(finalGasPrice) / 1e9} gwei)`);
       console.log(`   🎨 Minting to ${items.length} address(es)...`);
 
       // Use batchMint for multiple addresses, mint for single address
@@ -274,7 +282,7 @@ export class MintQueueProcessor {
           functionName: "mint",
           args: [addresses[0], txHashes[0]],
           gas: 200000n,
-          gasPrice: gasPriceWithBuffer,
+          gasPrice: finalGasPrice,
         } as any);
       } else {
         hash = await this.walletClient.writeContract({
@@ -283,7 +291,7 @@ export class MintQueueProcessor {
           functionName: "batchMint",
           args: [addresses, txHashes],
           gas: BigInt(150000 * items.length),
-          gasPrice: gasPriceWithBuffer,
+          gasPrice: finalGasPrice,
         } as any);
       }
 

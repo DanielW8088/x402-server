@@ -6,8 +6,12 @@
   "scripts": {
     "dev": "tsx watch index.ts",
     "dev:queue": "tsx watch index-queue.ts",
+    "dev:multi-token": "tsx watch index-multi-token.ts",
+    "lp-deployer": "tsx lp-deployer-standalone.ts",
+    "lp-deployer:watch": "tsx watch lp-deployer-standalone.ts",
     "start": "tsx index.ts",
     "start:queue": "tsx index-queue.ts",
+    "start:multi-token": "tsx index-multi-token.ts",
     "build": "tsc",
     "address": "tsx getAddress.ts",
     "check": "tsx checkPendingTx.ts",
