@@ -14,7 +14,7 @@ async function main() {
     const TOKEN_NAME = "PAYX";
     const TOKEN_SYMBOL = "PAYX";
     const MINT_AMOUNT = hre.ethers.parseEther("10000"); // 10k tokens per mint
-    const MAX_MINT_COUNT = 100000; // 100k mints max
+    const MAX_MINT_COUNT = 160000; // 160k mints max (80% of 2B supply)
 
     // Uniswap v4 addresses (Base Sepolia)
     const POOL_MANAGER = "0x7da1d65f8b249183667cde74c5cbd46dd38aa829";
@@ -23,12 +23,12 @@ async function main() {
 
     // Payment token (USDC)
     const PAYMENT_TOKEN = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // Base Sepolia USDC
-    const PAYMENT_SEED = hre.ethers.parseUnits("100000", 6); // 100k USDC for LP
-    const POOL_SEED_AMOUNT = hre.ethers.parseEther("1000000000"); // 1B tokens for LP
+    const PAYMENT_SEED = hre.ethers.parseUnits("40000", 6); // 40k USDC for LP (20% allocation)
+    const POOL_SEED_AMOUNT = hre.ethers.parseEther("400000000"); // 400M tokens for LP (20% allocation)
 
-    // sqrtPriceX96 configuration
-    const SQRT_PRICE_PAYMENT_FIRST = "3961408125713216879041820949";
-    const SQRT_PRICE_TOKEN_FIRST = "792281625142643375935439503360";
+    // sqrtPriceX96 configuration (40k USDC : 400M PAYX = 0.0001 USDC per token)
+    const SQRT_PRICE_PAYMENT_FIRST = "7922816251426434139029504"; // USDC is token0
+    const SQRT_PRICE_TOKEN_FIRST = "792281625142643375935439503360000"; // PAYX is token0
 
     // Mint test config
     const TEST_MINT_ADDRESS = process.env.TEST_MINT_ADDRESS; // Optional: specify recipient
