@@ -13,7 +13,9 @@
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.22.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
+    "better-sqlite3": "^12.4.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
