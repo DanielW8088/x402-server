@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
-import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, decodeEventLog } from "viem";
+import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, decodeEventLog } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 
@@ -59,7 +59,10 @@ const tokenAbi = parseAbi([
 const usdcAbi = parseAbi([
   "function balanceOf(address account) view returns (uint256)",
   "function transfer(address to, uint256 amount) external returns (bool)",
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
+  "function authorizationState(address authorizer, bytes32 nonce) view returns (bool)",
   "event Transfer(address indexed from, address indexed to, uint256 value)",
+  "event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)",
 ]);
 
 const app = express();
@@ -205,6 +208,7 @@ app.post("/mint", async (req, res) => {
       functionName: "mint",
       args: [payerAddress, txHashBytes32],
       gas: 200000n, // Explicit gas limit
+      gasPrice: gasPriceWithBuffer, // Use buffered gas price to avoid underpriced errors
     });
 
     console.log(`✅ Mint transaction sent: ${hash}`);
@@ -284,6 +288,323 @@ app.post("/mint", async (req, res) => {
       error: "Failed to mint tokens",
       details: error.message,
       tip: "Check that the server address has MINTER_ROLE and sufficient ETH for gas",
+    });
+  }
+});
+
+/**
+ * Gasless mint endpoint using EIP-3009
+ * User signs an authorization, server executes the USDC transfer and mints tokens
+ * 
+ * Request body:
+ * {
+ *   "authorization": {
+ *     "from": "0x...",
+ *     "to": "0x...",
+ *     "value": "1000000",
+ *     "validAfter": "0",
+ *     "validBefore": "1234567890",
+ *     "nonce": "0x...",
+ *     "signature": "0x..."
+ *   }
+ * }
+ */
+app.post("/mint-gasless", async (req, res) => {
+  try {
+    const { authorization } = req.body;
+
+    if (!authorization) {
+      return res.status(400).json({
+        error: "Missing authorization",
+      });
+    }
+
+    const { from, to, value, validAfter, validBefore, nonce, signature } = authorization;
+
+    if (!from || !to || !value || !validAfter || !validBefore || !nonce || !signature) {
+      return res.status(400).json({
+        error: "Invalid authorization format",
+      });
+    }
+
+    // Validate recipient is the payTo address
+    if (to.toLowerCase() !== payTo.toLowerCase()) {
+      return res.status(400).json({
+        error: "Invalid recipient address",
+        expected: payTo,
+        received: to,
+      });
+    }
+
+    // Validate payment amount
+    const requiredAmountWei = parseUnits(requiredPayment, 6);
+    if (BigInt(value) < requiredAmountWei) {
+      return res.status(400).json({
+        error: "Insufficient payment amount",
+        required: requiredAmountWei.toString(),
+        received: value,
+      });
+    }
+
+    // Check if authorization has been used
+    const authUsed = await publicClient.readContract({
+      address: usdcContractAddress,
+      abi: usdcAbi,
+      functionName: "authorizationState",
+      args: [from as `0x${string}`, nonce as `0x${string}`],
+    });
+
+    if (authUsed) {
+      return res.status(400).json({
+        error: "Authorization already used",
+        nonce,
+      });
+    }
+
+    // Split signature into v, r, s
+    const sig = signature as `0x${string}`;
+    const r = sig.slice(0, 66) as `0x${string}`;
+    const s = `0x${sig.slice(66, 130)}` as `0x${string}`;
+    let v = parseInt(sig.slice(130, 132), 16);
+
+    // Normalize v value: some wallets return 0/1, USDC expects 27/28
+    if (v < 27) {
+      v += 27;
+      console.log(`   ⚠️  Normalized v from ${v - 27} to ${v}`);
+    }
+
+    console.log(`💳 Processing gasless USDC transfer...`);
+    console.log(`   From: ${from}`);
+    console.log(`   To: ${to}`);
+    console.log(`   Amount: ${value} (${formatUnits(BigInt(value), 6)} USDC)`);
+    console.log(`   ValidAfter: ${validAfter}`);
+    console.log(`   ValidBefore: ${validBefore} (${new Date(Number(validBefore) * 1000).toISOString()})`);
+    console.log(`   Nonce: ${nonce}`);
+    console.log(`   Signature: ${sig}`);
+    console.log(`   Signature length: ${sig.length}`);
+    console.log(`   v: ${v}, r: ${r.slice(0, 20)}..., s: ${s.slice(0, 20)}...`);
+
+    // Validate signature format
+    if (sig.length !== 132) {
+      console.error(`❌ Invalid signature length: ${sig.length} (expected 132)`);
+      return res.status(400).json({
+        error: "Invalid signature format",
+        details: `Signature must be 132 characters (including 0x), got ${sig.length}`,
+      });
+    }
+
+    // Get gas price with buffer for USDC transfer
+    const transferGasPrice = await publicClient.getGasPrice();
+    const transferGasPriceBuffered = transferGasPrice > 0n ? (transferGasPrice * 130n) / 100n : 1000000n; // 1.3x buffer
+    console.log(`⛽ Gas price: ${transferGasPrice.toString()} (buffered: ${transferGasPriceBuffered.toString()})`);
+
+    // Execute transferWithAuthorization
+    console.log(`   Executing transferWithAuthorization...`);
+    const transferHash = await walletClient.writeContract({
+      address: usdcContractAddress,
+      abi: usdcAbi,
+      functionName: "transferWithAuthorization",
+      args: [
+        from as `0x${string}`,
+        to as `0x${string}`,
+        BigInt(value),
+        BigInt(validAfter),
+        BigInt(validBefore),
+        nonce as `0x${string}`,
+        v,
+        r,
+        s,
+      ],
+      gas: 150000n,
+      gasPrice: transferGasPriceBuffered, // Use buffered gas price
+    });
+
+    console.log(`✅ USDC transfer submitted: ${transferHash}`);
+    console.log(`   Waiting for confirmation (timeout: 60s)...`);
+
+    // Wait for USDC transfer confirmation
+    let transferReceipt;
+    try {
+      transferReceipt = await publicClient.waitForTransactionReceipt({ 
+        hash: transferHash,
+        confirmations: 1,
+        timeout: 60_000,
+      });
+    } catch (receiptError: any) {
+      console.error(`❌ Failed to get transfer receipt:`, receiptError.message);
+      return res.status(500).json({
+        error: "Failed to confirm USDC transfer",
+        txHash: transferHash,
+        details: receiptError.message,
+        tip: "Transaction may still be processing. Check Basescan for status.",
+      });
+    }
+
+    if (transferReceipt.status !== "success") {
+      console.error(`❌ USDC transfer failed (reverted)`);
+      console.error(`   Transaction hash: ${transferHash}`);
+      console.error(`   View on Basescan: https://sepolia.basescan.org/tx/${transferHash}`);
+      
+      // Try to get revert reason
+      let revertReason = "Unknown";
+      try {
+        const tx = await publicClient.getTransaction({ hash: transferHash });
+        console.error(`   Transaction details:`, {
+          from: tx.from,
+          to: tx.to,
+          value: tx.value,
+          gas: tx.gas,
+          gasPrice: tx.gasPrice,
+        });
+      } catch (e) {
+        console.error(`   Could not fetch transaction details`);
+      }
+      
+      return res.status(500).json({
+        error: "USDC transfer failed (reverted)",
+        txHash: transferHash,
+        status: transferReceipt.status,
+        basescanUrl: `https://sepolia.basescan.org/tx/${transferHash}`,
+        tip: "Check the transaction on Basescan for the revert reason. Common causes: invalid signature, nonce already used, or authorization expired.",
+      });
+    }
+
+    console.log(`✅ USDC transfer confirmed at block ${transferReceipt.blockNumber}`);
+
+    // Use the transfer txHash for minting (to prevent double-minting)
+    const txHashBytes32 = transferHash as `0x${string}`;
+    const payerAddress = from as `0x${string}`;
+
+    // Check if already minted
+    if (processedTxs.has(transferHash)) {
+      return res.status(200).json({
+        success: true,
+        message: "Tokens already minted for this payment",
+        payer: from,
+        paymentTxHash: transferHash,
+      });
+    }
+
+    const alreadyMinted = await publicClient.readContract({
+      address: tokenContractAddress,
+      abi: tokenAbi,
+      functionName: "hasMinted",
+      args: [txHashBytes32],
+    });
+
+    if (alreadyMinted) {
+      processedTxs.add(transferHash);
+      return res.status(200).json({
+        success: true,
+        message: "Tokens already minted for this payment",
+        payer: from,
+        paymentTxHash: transferHash,
+      });
+    }
+
+    // Check remaining supply
+    const [remainingSupply, mintAmountPerPayment] = await Promise.all([
+      publicClient.readContract({
+        address: tokenContractAddress,
+        abi: tokenAbi,
+        functionName: "remainingSupply",
+      }),
+      publicClient.readContract({
+        address: tokenContractAddress,
+        abi: tokenAbi,
+        functionName: "mintAmount",
+      }),
+    ]);
+
+    if (remainingSupply < mintAmountPerPayment) {
+      return res.status(400).json({
+        error: "Maximum supply reached",
+        remainingSupply: remainingSupply.toString(),
+      });
+    }
+
+    // Get gas price with buffer for mint
+    const mintGasPrice = await publicClient.getGasPrice();
+    const mintGasPriceBuffered = mintGasPrice > 0n ? (mintGasPrice * 130n) / 100n : 1000000n; // 1.3x buffer for gasless
+    console.log(`⛽ Mint gas price: ${mintGasPrice.toString()} (buffered: ${mintGasPriceBuffered.toString()})`);
+
+    // Mint tokens
+    console.log(`🎨 Minting tokens to ${payerAddress}...`);
+    const mintHash = await walletClient.writeContract({
+      address: tokenContractAddress,
+      abi: tokenAbi,
+      functionName: "mint",
+      args: [payerAddress, txHashBytes32],
+      gas: 200000n,
+      gasPrice: mintGasPriceBuffered, // Use buffered gas price
+    });
+
+    console.log(`✅ Mint transaction sent: ${mintHash}`);
+
+    // Wait for mint confirmation
+    const mintReceipt = await publicClient.waitForTransactionReceipt({ 
+      hash: mintHash,
+      confirmations: 1,
+      timeout: 60_000,
+    });
+
+    console.log(`✅ Mint confirmed at block ${mintReceipt.blockNumber}`);
+
+    // Mark as processed
+    processedTxs.add(transferHash);
+
+    return res.status(200).json({
+      success: true,
+      message: "Tokens minted successfully (gasless!)",
+      payer: from,
+      amount: mintAmountPerPayment.toString(),
+      mintTxHash: mintHash,
+      paymentTxHash: transferHash,
+      blockNumber: mintReceipt.blockNumber.toString(),
+      gasless: true,
+    });
+
+  } catch (error: any) {
+    console.error("❌ Gasless mint error:", error.message);
+    console.error("   Full error:", error);
+    
+    if (error.message?.includes("MaxSupplyExceeded") || error.message?.includes("MaxMintCountExceeded")) {
+      return res.status(400).json({
+        error: "Maximum supply exceeded",
+      });
+    }
+
+    if (error.message?.includes("InvalidSignature") || error.message?.includes("InvalidSigner")) {
+      return res.status(400).json({
+        error: "Invalid signature",
+        message: "The provided signature is invalid",
+      });
+    }
+
+    if (error.message?.includes("AuthorizationExpired")) {
+      return res.status(400).json({
+        error: "Authorization expired",
+        message: "The authorization has expired",
+      });
+    }
+
+    if (error.message?.includes("AuthorizationStateInvalid") || error.message?.includes("authorization is used or canceled")) {
+      return res.status(400).json({
+        error: "Authorization already used or canceled",
+      });
+    }
+
+    if (error.message?.includes("insufficient funds")) {
+      return res.status(400).json({
+        error: "Insufficient funds",
+        message: "Server does not have enough ETH for gas fees",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to process gasless mint",
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
@@ -382,10 +703,15 @@ app.listen(PORT, () => {
   console.log(`Required Payment: ${requiredPayment} USDC`);
   console.log(`\nEndpoints:`);
   console.log(`  POST /mint - Mint tokens after USDC payment`);
+  console.log(`  POST /mint-gasless - Gasless mint using EIP-3009 🆓`);
   console.log(`  GET /health - Health check`);
   console.log(`  GET /info - Get mint info`);
-  console.log(`\nUsage:`);
+  console.log(`\nUsage (Traditional):`);
   console.log(`  1. Send ${requiredPayment} USDC to ${payTo}`);
   console.log(`  2. POST to /mint with { "paymentTxHash": "0x...", "payer": "0x..." }`);
+  console.log(`\nUsage (Gasless):`);
+  console.log(`  1. Sign EIP-3009 authorization`);
+  console.log(`  2. POST to /mint-gasless with { "authorization": {...} }`);
+  console.log(`  3. ✨ Pay ZERO gas fees!`);
 });
 
