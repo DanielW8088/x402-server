@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
-import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, decodeEventLog, keccak256, toHex } from "viem";
+import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, decodeEventLog, keccak256, toHex, getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { paymentMiddleware } from "x402-express";
@@ -73,6 +73,7 @@ const tokenAbi = parseAbi([
 const usdcAbi = parseAbi([
   "function balanceOf(address account) view returns (uint256)",
   "function transfer(address to, uint256 amount) external returns (bool)",
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
   "event Transfer(address indexed from, address indexed to, uint256 value)",
 ]);
 
@@ -128,13 +129,20 @@ async function verifyUSDCPayment(txHash: `0x${string}`, expectedPayer: `0x${stri
 
 /**
  * Custom middleware to handle our simplified x402 payment before the standard middleware
- * This allows us to bypass the x402-express middleware when we have a custom X-PAYMENT header
+ * This allows us to bypass the x402-express middleware when we have:
+ * 1. Custom X-PAYMENT header (client sends USDC tx hash)
+ * 2. EIP-3009 authorization in body (gasless mode)
  */
 app.use((req, res, next) => {
-  // Check if this is a POST to /mint with our custom X-PAYMENT header
-  if (req.method === 'POST' && req.path === '/mint' && req.headers['x-payment']) {
-    // Mark this request to bypass x402 middleware
-    (req as any).skipX402Middleware = true;
+  // Check if this is a POST to /mint with our custom payment or gasless authorization
+  if (req.method === 'POST' && req.path === '/mint') {
+    // Skip x402 middleware if:
+    // 1. Has X-PAYMENT header (custom payment proof)
+    // 2. Has authorization in body (EIP-3009 gasless)
+    if (req.headers['x-payment'] || (req.body && req.body.authorization)) {
+      console.log('🔓 Bypassing x402 middleware - custom payment or gasless mode detected');
+      (req as any).skipX402Middleware = true;
+    }
   }
   next();
 });
@@ -154,10 +162,12 @@ const facilitatorConfig = network === "base-sepolia"
  * This middleware intercepts requests to /mint and requires payment
  * before allowing access. The facilitator handles payment verification.
  * 
- * Note: Requests with our custom X-PAYMENT header will be marked to skip this middleware
+ * Note: Requests will skip this middleware if they have:
+ * - Custom X-PAYMENT header (client-verified USDC transaction)
+ * - EIP-3009 authorization in body (gasless mode with signed authorization)
  */
 app.use((req, res, next) => {
-  // Skip x402 middleware if we have our custom payment
+  // Skip x402 middleware if we have custom payment or gasless authorization
   if ((req as any).skipX402Middleware) {
     return next();
   }
@@ -274,9 +284,188 @@ app.post("/mint", async (req, res) => {
   try {
     let payer: `0x${string}`;
     let paymentTxHash: string | undefined;
+    let isGasless = false;
     
-    // First check if x402 middleware already verified payment
-    const x402Payment = (req as any).x402Payment;
+    // Check if this is a gasless request with EIP-3009 authorization
+    const authorization = req.body.authorization;
+    
+    if (authorization && authorization.signature) {
+      // Gasless mode: Use EIP-3009 receiveWithAuthorization
+      console.log(`🆓 Gasless mint request detected (EIP-3009)`);
+      console.log(`   From: ${authorization.from}`);
+      console.log(`   To: ${authorization.to}`);
+      console.log(`   Value: ${authorization.value}`);
+      
+      payer = authorization.from as `0x${string}`;
+      isGasless = true;
+      
+      // Validate addresses
+      if (!authorization.from || !authorization.to) {
+        throw new Error('Missing from or to address in authorization');
+      }
+      
+      // CRITICAL: Ensure addresses are in checksum format for EIP-712
+      // EIP-712 signatures are case-sensitive!
+      // getAddress() will throw if address is invalid, and return checksummed version
+      try {
+        const fromChecksummed = getAddress(authorization.from);
+        const toChecksummed = getAddress(authorization.to);
+        
+        // Update to checksummed versions
+        authorization.from = fromChecksummed;
+        authorization.to = toChecksummed;
+        
+        console.log(`   ✅ Addresses validated and checksummed:`);
+        console.log(`      from: ${authorization.from}`);
+        console.log(`      to: ${authorization.to}`);
+      } catch (err: any) {
+        throw new Error(`Invalid address format: ${err.message}`);
+      }
+      
+      // Execute transferWithAuthorization to transfer USDC (server pays gas)
+      try {
+        console.log(`💸 Executing transferWithAuthorization...`);
+        console.log(`   FULL AUTHORIZATION OBJECT:`);
+        console.log(JSON.stringify(authorization, null, 2));
+        console.log(`   From: ${authorization.from}`);
+        console.log(`   To: ${authorization.to}`);
+        console.log(`   Value: ${authorization.value} (type: ${typeof authorization.value})`);
+        console.log(`   ValidAfter: ${authorization.validAfter} (type: ${typeof authorization.validAfter})`);
+        console.log(`   ValidBefore: ${authorization.validBefore} (type: ${typeof authorization.validBefore})`);
+        console.log(`   Nonce: ${authorization.nonce}`);
+        console.log(`   Nonce length: ${authorization.nonce?.length} chars`);
+        console.log(`   Signature: ${authorization.signature}`);
+        
+        // Split signature into v, r, s components
+        // Signature format: 0x + r (64 chars) + s (64 chars) + v (2 chars) = 132 chars total
+        const sig = authorization.signature.startsWith('0x') 
+          ? authorization.signature.slice(2) 
+          : authorization.signature;
+        
+        console.log(`   Full signature (hex): ${sig.substring(0, 40)}...${sig.substring(sig.length - 10)}`);
+        console.log(`   Signature length: ${sig.length} characters (${sig.length / 2} bytes)`);
+        
+        if (sig.length !== 130) {
+          throw new Error(`Invalid signature length: ${sig.length}. Expected 130 hex characters (65 bytes)`);
+        }
+        
+        const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
+        const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
+        let v = parseInt(sig.slice(128, 130), 16);
+        
+        console.log(`   Raw signature components:`);
+        console.log(`     v (raw): ${v} (0x${sig.slice(128, 130)})`);
+        console.log(`     r: ${r}`);
+        console.log(`     s: ${s}`);
+        
+        // Normalize v to 27 or 28 if needed
+        // MetaMask/wagmi return v as 27/28, but some wallets may return 0/1
+        if (v === 0 || v === 1) {
+          console.log(`   ⚠️  v is ${v}, normalizing to ${v + 27}`);
+          v = v + 27;
+        } else if (v !== 27 && v !== 28) {
+          // If v is already > 27, it might be chainId * 2 + 35 + {0,1} (EIP-155)
+          // For EIP-712, we need plain 27/28, so try to extract the recovery id
+          const recoveryId = v >= 35 ? ((v - 35) % 2) : (v % 2);
+          console.log(`   ⚠️  v is ${v}, extracting recovery id: ${recoveryId}, normalized: ${27 + recoveryId}`);
+          v = 27 + recoveryId;
+        }
+        
+        console.log(`   Final v: ${v}`);
+        
+        // Verify v is valid (27 or 28 for Ethereum)
+        if (v !== 27 && v !== 28) {
+          throw new Error(`Invalid v value: ${v}. Expected 27 or 28 after normalization.`);
+        }
+        
+        const gasPrice = await publicClient.getGasPrice();
+        const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 150n) / 100n : 1000000n; // 150% buffer to avoid underpriced errors
+        
+        // CRITICAL: EIP-712 signatures are case-sensitive for addresses!
+        // We must use the EXACT same address format that was used during signing
+        // The frontend uses the address as-is from the wallet (checksum format)
+        // So we pass them exactly as received
+        console.log(`   Calling contract with args:`);
+        console.log(`     from: ${authorization.from}`);
+        console.log(`     to: ${authorization.to}`);
+        console.log(`     value: ${BigInt(authorization.value)}`);
+        console.log(`     validAfter: ${BigInt(authorization.validAfter)}`);
+        console.log(`     validBefore: ${BigInt(authorization.validBefore)}`);
+        console.log(`     nonce: ${authorization.nonce}`);
+        console.log(`     v: ${v}`);
+        
+        const authHash = await walletClient.writeContract({
+          address: usdcContractAddress,
+          abi: usdcAbi,
+          functionName: "transferWithAuthorization",
+          args: [
+            authorization.from as `0x${string}`,  // Use exactly as signed
+            authorization.to as `0x${string}`,    // Use exactly as signed
+            BigInt(authorization.value),
+            BigInt(authorization.validAfter),
+            BigInt(authorization.validBefore),
+            authorization.nonce as `0x${string}`,
+            v,
+            r,
+            s,
+          ],
+          gas: 200000n,
+          gasPrice: gasPriceWithBuffer,
+        });
+        
+        console.log(`✅ USDC transfer authorization executed: ${authHash}`);
+        console.log(`   View on Basescan: https://${network === 'base-sepolia' ? 'sepolia.' : ''}basescan.org/tx/${authHash}`);
+        console.log(`   Waiting for confirmation...`);
+        
+        const authReceipt = await publicClient.waitForTransactionReceipt({ 
+          hash: authHash,
+          confirmations: 1,
+          timeout: 60_000,
+        });
+        
+        console.log(`   Receipt status: ${authReceipt.status}`);
+        console.log(`   Gas used: ${authReceipt.gasUsed}`);
+        
+        if (authReceipt.status !== "success") {
+          console.error(`❌ Transaction reverted!`);
+          console.error(`   TX Hash: ${authHash}`);
+          console.error(`   Block: ${authReceipt.blockNumber}`);
+          console.error(`   Gas Used: ${authReceipt.gasUsed}`);
+          console.error(`   Check transaction on Basescan for revert reason`);
+          
+          throw new Error(`USDC transfer transaction reverted. TX: ${authHash}. Check Basescan for details.`);
+        }
+        
+        console.log(`✅ USDC transfer confirmed at block ${authReceipt.blockNumber}`);
+        paymentTxHash = authHash;
+      } catch (error: any) {
+        console.error("❌ transferWithAuthorization failed:", error.message);
+        
+        // Provide helpful error details
+        let errorDetails = "Failed to execute EIP-3009 transferWithAuthorization. ";
+        
+        if (error.message?.includes("reverted")) {
+          errorDetails += "Transaction was reverted on-chain. Common causes: ";
+          errorDetails += "1) Invalid signature, ";
+          errorDetails += "2) Nonce already used, ";
+          errorDetails += "3) Authorization expired, ";
+          errorDetails += "4) Insufficient balance. ";
+          errorDetails += "Check the transaction on Basescan for exact revert reason.";
+        } else if (error.message?.includes("insufficient funds")) {
+          errorDetails += "Server wallet has insufficient ETH for gas fees.";
+        }
+        
+        return res.status(400).json({
+          error: "USDC transfer failed",
+          message: error.message,
+          details: errorDetails,
+          txHash: error.message?.match(/0x[a-fA-F0-9]{64}/)?.[0], // Extract TX hash if present
+        });
+      }
+    } else {
+      // Not gasless mode, check other payment methods
+      // First check if x402 middleware already verified payment
+      const x402Payment = (req as any).x402Payment;
     
     if (x402Payment && x402Payment.payer) {
       // x402-express middleware verified the payment
@@ -330,6 +519,7 @@ app.post("/mint", async (req, res) => {
         console.log(`💳 Using payer from body: ${payer}`);
       }
     }
+    } // End of non-gasless payment verification
 
     // Generate unique transaction hash for this mint
     const timestamp = Date.now();
@@ -381,11 +571,12 @@ app.post("/mint", async (req, res) => {
       });
     }
 
-    // Get gas price with buffer
-    const gasPrice = await publicClient.getGasPrice();
-    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 120n) / 100n : 1000000n;
+    // Get fresh gas price for mint transaction (to avoid underpriced errors)
+    const mintGasPrice = await publicClient.getGasPrice();
+    const mintGasPriceWithBuffer = mintGasPrice > 0n ? (mintGasPrice * 150n) / 100n : 1000000n; // 150% buffer
     
     console.log(`🎨 Minting to ${payer}...`);
+    console.log(`   Gas price: ${mintGasPrice.toString()} (buffered: ${mintGasPriceWithBuffer.toString()})`);
 
     // Mint tokens
     const hash = await walletClient.writeContract({
@@ -394,7 +585,7 @@ app.post("/mint", async (req, res) => {
       functionName: "mint",
       args: [payer, txHashBytes32],
       gas: 200000n,
-      gasPrice: gasPriceWithBuffer,
+      gasPrice: mintGasPriceWithBuffer,
     });
 
     console.log(`✅ Mint transaction sent: ${hash}`);
@@ -413,15 +604,27 @@ app.post("/mint", async (req, res) => {
     // Mark as processed
     processedTxs.add(txHashBytes32);
 
-    return res.status(200).json({
+    const response: any = {
       success: true,
-      message: "Tokens minted successfully via x402 payment",
+      message: isGasless 
+        ? "Tokens minted successfully (gasless via EIP-3009!)" 
+        : "Tokens minted successfully via x402 payment",
       payer,
       amount: mintAmountPerPayment.toString(),
       mintTxHash: hash,
       blockNumber: receipt.blockNumber.toString(),
       timestamp,
-    });
+    };
+
+    if (paymentTxHash) {
+      response.paymentTxHash = paymentTxHash;
+    }
+
+    if (isGasless) {
+      response.gasless = true;
+    }
+
+    return res.status(200).json(response);
   } catch (error: any) {
     console.error("❌ Mint error:", error.message);
     
@@ -429,6 +632,16 @@ app.post("/mint", async (req, res) => {
       return res.status(400).json({
         error: "Maximum supply exceeded",
         message: "Cannot mint more tokens, supply cap has been reached",
+      });
+    }
+    
+    if (error.message?.includes("replacement transaction underpriced") || 
+        error.message?.includes("nonce too low") ||
+        error.message?.includes("already known")) {
+      return res.status(409).json({
+        error: "Transaction conflict",
+        message: "A transaction with the same nonce is pending or gas price is too low",
+        tip: "Please wait a moment and try again. The previous transaction may still be processing.",
       });
     }
     
@@ -539,7 +752,7 @@ app.post("/mint-direct", async (req, res) => {
 
     // Get gas price with buffer to avoid underpriced errors
     const gasPrice = await publicClient.getGasPrice();
-    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 120n) / 100n : 1000000n;
+    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 150n) / 100n : 1000000n; // 150% buffer
     
     console.log(`⛽ Gas price: ${gasPrice.toString()} (buffered: ${gasPriceWithBuffer.toString()})`);
 
@@ -589,6 +802,16 @@ app.post("/mint-direct", async (req, res) => {
       });
     }
     
+    if (error.message?.includes("replacement transaction underpriced") || 
+        error.message?.includes("nonce too low") ||
+        error.message?.includes("already known")) {
+      return res.status(409).json({
+        error: "Transaction conflict",
+        message: "A transaction with the same nonce is pending or gas price is too low",
+        tip: "Please wait a moment and try again. The previous transaction may still be processing.",
+      });
+    }
+    
     if (error.message?.includes("timeout") || error.name === "TimeoutError") {
       return res.status(504).json({
         error: "Transaction timeout",
@@ -624,7 +847,7 @@ app.get("/health", (req, res) => {
     status: "ok",
     network,
     tokenContract: tokenContractAddress,
-    payTo,
+    payTo: getAddress(payTo), // Return checksummed address
     protocol: "x402",
   });
 });
@@ -695,7 +918,7 @@ app.get("/info", async (req, res) => {
       liquidityDeployed,
       network,
       tokenContract: tokenContractAddress,
-      payTo,
+      payTo: getAddress(payTo), // CRITICAL: Return checksummed address for EIP-712 signing
     });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch contract info" });
@@ -708,7 +931,7 @@ app.listen(PORT, () => {
   console.log(`🚀 x402 Token Mint Server running on port ${PORT}`);
   console.log(`Network: ${network}`);
   console.log(`Token Contract: ${tokenContractAddress}`);
-  console.log(`Pay To Address: ${payTo}`);
+  console.log(`Pay To Address: ${getAddress(payTo)}`);
   console.log(`Server Address: ${account.address}`);
   console.log(`Required Payment: ${requiredPayment} USDC`);
   console.log(`Protocol: x402 (HTTP 402 Payment Required)`);
