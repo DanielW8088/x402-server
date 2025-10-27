@@ -1,16 +1,22 @@
 {
   "name": "x402-token-mint-client",
   "version": "1.0.0",
-  "description": "Client for token minting",
+  "description": "Client for token minting (x402 enabled)",
   "main": "index.ts",
   "scripts": {
     "start": "tsx index.ts",
+    "start:fetch": "tsx index-x402-fetch.ts",
+    "start:axios": "tsx index-x402-standard.ts",
+    "start:manual": "tsx index-x402-working.ts",
     "build": "tsc"
   },
   "dependencies": {
+    "@coinbase/x402": "^0.6.6",
     "axios": "^1.7.9",
-    "dotenv": "^16.4.7",
-    "viem": "^2.21.54"
+    "dotenv": "^16.6.1",
+    "viem": "^2.38.4",
+    "x402-axios": "^0.6.6",
+    "x402-fetch": "^0.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -18,4 +24,3 @@
     "typescript": "^5.7.2"
   }
 }
-

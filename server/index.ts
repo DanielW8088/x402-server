@@ -1,13 +1,11 @@
 import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
-import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, decodeEventLog } from "viem";
+import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, decodeEventLog, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
-import { NonceManager } from "./nonceManager";
-import { dbUtils } from "./db";
-import { TransactionQueue, type MintRequest } from "./txQueue";
-import { TransactionMonitor } from "./txMonitor";
+import { paymentMiddleware } from "x402-express";
+import { facilitator } from "@coinbase/x402";
 
 config();
 
@@ -19,12 +17,27 @@ const payTo = process.env.PAY_TO_ADDRESS as `0x${string}`;
 const network = (process.env.NETWORK || "base-sepolia") as "base-sepolia" | "base";
 const requiredPayment = process.env.REQUIRED_PAYMENT_USDC || "1"; // USDC amount
 
+// CDP API keys (required for mainnet)
+const cdpApiKeyId = process.env.CDP_API_KEY_ID;
+const cdpApiKeySecret = process.env.CDP_API_KEY_SECRET;
+
 // Validation
 if (!serverPrivateKey || !tokenContractAddress || !payTo) {
   console.error("Missing required environment variables:");
   console.error("- SERVER_PRIVATE_KEY (for calling contract as MINTER_ROLE)");
   console.error("- TOKEN_CONTRACT_ADDRESS");
   console.error("- PAY_TO_ADDRESS (where you receive USDC)");
+  process.exit(1);
+}
+
+// Validate CDP API keys for mainnet
+if (network === "base" && (!cdpApiKeyId || !cdpApiKeySecret)) {
+  console.error("⚠️  Warning: CDP API keys not configured for mainnet!");
+  console.error("For mainnet (base), you need:");
+  console.error("- CDP_API_KEY_ID");
+  console.error("- CDP_API_KEY_SECRET");
+  console.error("\nGet your API keys at: https://portal.cdp.coinbase.com/");
+  console.error("\nFor testnet, you can use the public facilitator without API keys.");
   process.exit(1);
 }
 
@@ -55,65 +68,27 @@ const tokenAbi = parseAbi([
   "function maxMintCount() view returns (uint256)",
   "function liquidityDeployed() view returns (bool)",
   "event TokensMinted(address indexed to, uint256 amount, bytes32 txHash)",
-  "event LiquidityDeployed(uint256 tokenId, uint128 liquidity)",
-  "error MaxSupplyExceeded()",
-  "error MaxMintCountExceeded()",
 ]);
 
 const usdcAbi = parseAbi([
   "function balanceOf(address account) view returns (uint256)",
   "function transfer(address to, uint256 amount) external returns (bool)",
-  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
-  "function authorizationState(address authorizer, bytes32 nonce) view returns (bool)",
   "event Transfer(address indexed from, address indexed to, uint256 value)",
-  "event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)",
 ]);
-
-// Initialize nonce manager
-const nonceManager = new NonceManager(publicClient as any, account.address);
-
-// Initialize transaction queue and monitor
-const txQueue = new TransactionQueue();
-const txMonitor = new TransactionMonitor(publicClient as any, walletClient, tokenAbi);
-
-// Start transaction monitor
-txMonitor.start();
 
 const app = express();
 
-// Enable CORS for all origins in development
+// Enable CORS
 app.use(cors({
-  origin: '*', // Allow all origins in development. In production, specify your domain.
+  origin: '*',
   methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type'],
+  allowedHeaders: ['Content-Type', 'X-PAYMENT'],
 }));
 
 app.use(express.json());
 
-// Track processed transactions to prevent double-minting (in-memory cache for quick checks)
+// Track processed transactions
 const processedTxs = new Set<string>();
-
-// Mutex lock for gasless mint to prevent concurrent nonce issues
-let gaslessMintLock: Promise<void> = Promise.resolve();
-
-/**
- * Execute function with mutex lock
- */
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previousLock = gaslessMintLock;
-  let releaseLock: () => void;
-  
-  gaslessMintLock = new Promise<void>((resolve) => {
-    releaseLock = resolve;
-  });
-
-  try {
-    await previousLock;
-    return await fn();
-  } finally {
-    releaseLock!();
-  }
-}
 
 /**
  * Helper: Verify USDC payment transaction
@@ -152,8 +127,337 @@ async function verifyUSDCPayment(txHash: `0x${string}`, expectedPayer: `0x${stri
 }
 
 /**
- * Main mint endpoint
- * Verifies USDC payment and mints tokens to the payer
+ * Custom middleware to handle our simplified x402 payment before the standard middleware
+ * This allows us to bypass the x402-express middleware when we have a custom X-PAYMENT header
+ */
+app.use((req, res, next) => {
+  // Check if this is a POST to /mint with our custom X-PAYMENT header
+  if (req.method === 'POST' && req.path === '/mint' && req.headers['x-payment']) {
+    // Mark this request to bypass x402 middleware
+    (req as any).skipX402Middleware = true;
+  }
+  next();
+});
+
+/**
+ * Configure facilitator based on network
+ * - Testnet: Use public facilitator (no API keys needed)
+ * - Mainnet: Use Coinbase CDP facilitator (requires API keys)
+ */
+const facilitatorConfig = network === "base-sepolia" 
+  ? { url: "https://x402.org/facilitator" }  // Public facilitator for testnet
+  : facilitator;  // CDP facilitator for mainnet (requires CDP_API_KEY_ID and CDP_API_KEY_SECRET)
+
+/**
+ * x402 Payment Middleware Configuration
+ * 
+ * This middleware intercepts requests to /mint and requires payment
+ * before allowing access. The facilitator handles payment verification.
+ * 
+ * Note: Requests with our custom X-PAYMENT header will be marked to skip this middleware
+ */
+app.use((req, res, next) => {
+  // Skip x402 middleware if we have our custom payment
+  if ((req as any).skipX402Middleware) {
+    return next();
+  }
+  
+  // Apply x402 middleware
+  return paymentMiddleware(
+    payTo,
+    {
+      "POST /mint": {
+        price: `$${requiredPayment}`,
+        network: network,
+        config: {
+          description: `Mint tokens - Pay ${requiredPayment} USDC`,
+          mimeType: "application/json",
+          maxTimeoutSeconds: 120,
+          inputSchema: {
+            type: "object",
+            properties: {
+              payer: {
+                type: "string",
+                description: "Ethereum address that will receive the minted tokens"
+              }
+            },
+            required: ["payer"]
+          },
+          outputSchema: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              payer: { type: "string" },
+              amount: { type: "string", description: "Amount of tokens minted" },
+              mintTxHash: { type: "string", description: "Transaction hash of the mint" },
+              blockNumber: { type: "string" },
+              timestamp: { type: "number" }
+            }
+          }
+        }
+      }
+    },
+    facilitatorConfig
+  )(req, res, next);
+});
+
+/**
+ * Generate a unique transaction hash for minting
+ * Since x402 payment is off-chain, we need to create a unique identifier
+ */
+function generateMintTxHash(payer: string, timestamp: number): `0x${string}` {
+  const data = `${payer}-${timestamp}`;
+  // Use keccak256 to generate a proper 32-byte hash
+  const hash = keccak256(toHex(data));
+  return hash as `0x${string}`;
+}
+
+/**
+ * Verify custom X-PAYMENT header (our simplified x402 implementation)
+ */
+async function verifyCustomPayment(paymentHeader: string): Promise<{
+  valid: boolean;
+  txHash?: string;
+  payer?: string;
+  error?: string;
+}> {
+  try {
+    // Decode base64 payment proof
+    const proofJson = Buffer.from(paymentHeader, 'base64').toString('utf8');
+    const proof = JSON.parse(proofJson);
+    
+    if (proof.type !== 'transaction') {
+      return { valid: false, error: 'Invalid payment type' };
+    }
+    
+    const { txHash, payer } = proof;
+    
+    if (!txHash || !payer) {
+      return { valid: false, error: 'Missing txHash or payer' };
+    }
+    
+    // Verify USDC payment on-chain
+    if (usdcContractAddress) {
+      const requiredAmountWei = parseUnits(requiredPayment, 6);
+      try {
+        await verifyUSDCPayment(txHash as `0x${string}`, payer as `0x${string}`, requiredAmountWei);
+        return { valid: true, txHash, payer };
+      } catch (error: any) {
+        return { valid: false, error: error.message };
+      }
+    }
+    
+    return { valid: true, txHash, payer };
+  } catch (error: any) {
+    return { valid: false, error: `Failed to parse payment: ${error.message}` };
+  }
+}
+
+/**
+ * Main mint endpoint (Protected by x402 payment middleware OR custom payment)
+ * 
+ * This endpoint supports two payment verification methods:
+ * 1. x402 middleware (standard x402 protocol)
+ * 2. Custom X-PAYMENT header with transaction hash
+ * 
+ * After payment is verified, this handler:
+ * 1. Checks remaining supply
+ * 2. Mints tokens to the payer
+ * 3. Returns mint transaction details
+ */
+app.post("/mint", async (req, res) => {
+  console.log(`\n🎨 POST /mint received`);
+  console.log(`   Headers:`, Object.keys(req.headers));
+  console.log(`   Body:`, req.body);
+  console.log(`   x402Payment:`, (req as any).x402Payment);
+  
+  try {
+    let payer: `0x${string}`;
+    let paymentTxHash: string | undefined;
+    
+    // First check if x402 middleware already verified payment
+    const x402Payment = (req as any).x402Payment;
+    
+    if (x402Payment && x402Payment.payer) {
+      // x402-express middleware verified the payment
+      payer = x402Payment.payer as `0x${string}`;
+      console.log(`✅ Payment verified via x402 middleware for ${payer}`);
+      console.log(`   Payment details:`, x402Payment);
+    } else {
+      // Check for custom X-PAYMENT header (manual USDC transfer implementation)
+      const customPayment = req.headers['x-payment'] as string;
+      
+      if (customPayment) {
+        // Try to verify as custom payment (type: "transaction")
+        console.log(`🔍 Checking custom payment format...`);
+        const verification = await verifyCustomPayment(customPayment);
+        
+        if (verification.valid) {
+          payer = verification.payer as `0x${string}`;
+          paymentTxHash = verification.txHash;
+          console.log(`✅ Custom payment verified for ${payer}`);
+          console.log(`   Payment TX: ${paymentTxHash}`);
+        } else {
+          // Not a valid custom payment, but X-PAYMENT exists
+          // This means x402 middleware should have handled it but didn't
+          console.log(`⚠️  X-PAYMENT header present but not verified`);
+          console.log(`   Verification error:`, verification.error);
+          
+          // Fall back to body payer (x402 middleware passed through)
+          payer = req.body.payer as `0x${string}`;
+          
+          if (!payer) {
+            return res.status(400).json({
+              error: "Payment verification incomplete",
+              message: "X-PAYMENT header exists but payment not verified, and no payer in body",
+              details: verification.error,
+            });
+          }
+          
+          console.log(`⚠️  Using payer from body (x402 middleware passed): ${payer}`);
+        }
+      } else {
+        // No X-PAYMENT header, use body payer
+        payer = req.body.payer as `0x${string}`;
+        
+        if (!payer) {
+          return res.status(400).json({
+            error: "Missing payer address",
+            message: "Payer must be provided in request body or via x402 payment",
+          });
+        }
+        
+        console.log(`💳 Using payer from body: ${payer}`);
+      }
+    }
+
+    // Generate unique transaction hash for this mint
+    const timestamp = Date.now();
+    const txHashBytes32 = generateMintTxHash(payer, timestamp);
+
+    // Check if already minted (safety check)
+    if (processedTxs.has(txHashBytes32)) {
+      return res.status(200).json({
+        success: true,
+        message: "Tokens already minted",
+        payer,
+      });
+    }
+
+    const alreadyMinted = await publicClient.readContract({
+      address: tokenContractAddress,
+      abi: tokenAbi,
+      functionName: "hasMinted",
+      args: [txHashBytes32],
+    });
+
+    if (alreadyMinted) {
+      processedTxs.add(txHashBytes32);
+      return res.status(200).json({
+        success: true,
+        message: "Tokens already minted",
+        payer,
+      });
+    }
+
+    // Check remaining supply
+    const [remainingSupply, mintAmountPerPayment] = await Promise.all([
+      publicClient.readContract({
+        address: tokenContractAddress,
+        abi: tokenAbi,
+        functionName: "remainingSupply",
+      }),
+      publicClient.readContract({
+        address: tokenContractAddress,
+        abi: tokenAbi,
+        functionName: "mintAmount",
+      }),
+    ]);
+
+    if (remainingSupply < mintAmountPerPayment) {
+      return res.status(400).json({
+        error: "Maximum supply reached",
+        remainingSupply: remainingSupply.toString(),
+      });
+    }
+
+    // Get gas price with buffer
+    const gasPrice = await publicClient.getGasPrice();
+    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 120n) / 100n : 1000000n;
+    
+    console.log(`🎨 Minting to ${payer}...`);
+
+    // Mint tokens
+    const hash = await walletClient.writeContract({
+      address: tokenContractAddress,
+      abi: tokenAbi,
+      functionName: "mint",
+      args: [payer, txHashBytes32],
+      gas: 200000n,
+      gasPrice: gasPriceWithBuffer,
+    });
+
+    console.log(`✅ Mint transaction sent: ${hash}`);
+    console.log(`   View on Basescan: https://${network === 'base-sepolia' ? 'sepolia.' : ''}basescan.org/tx/${hash}`);
+
+    // Wait for confirmation
+    console.log(`⏳ Waiting for confirmation...`);
+    const receipt = await publicClient.waitForTransactionReceipt({ 
+      hash,
+      confirmations: 1,
+      timeout: 60_000,
+    });
+    
+    console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
+
+    // Mark as processed
+    processedTxs.add(txHashBytes32);
+
+    return res.status(200).json({
+      success: true,
+      message: "Tokens minted successfully via x402 payment",
+      payer,
+      amount: mintAmountPerPayment.toString(),
+      mintTxHash: hash,
+      blockNumber: receipt.blockNumber.toString(),
+      timestamp,
+    });
+  } catch (error: any) {
+    console.error("❌ Mint error:", error.message);
+    
+    if (error.message?.includes("MaxSupplyExceeded") || error.message?.includes("MaxMintCountExceeded")) {
+      return res.status(400).json({
+        error: "Maximum supply exceeded",
+        message: "Cannot mint more tokens, supply cap has been reached",
+      });
+    }
+    
+    if (error.message?.includes("timeout") || error.name === "TimeoutError") {
+      return res.status(504).json({
+        error: "Transaction timeout",
+        message: "Transaction was sent but confirmation timed out",
+      });
+    }
+    
+    if (error.message?.includes("insufficient funds")) {
+      return res.status(400).json({
+        error: "Insufficient funds",
+        message: "Server does not have enough ETH for gas fees",
+      });
+    }
+    
+    return res.status(500).json({
+      error: "Failed to mint tokens",
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Direct mint endpoint (NOT protected by x402, for traditional clients)
+ * 
+ * This endpoint accepts traditional USDC payment via paymentTxHash.
+ * Used for testing with traditional CLI clients.
  * 
  * Request body:
  * {
@@ -161,7 +465,7 @@ async function verifyUSDCPayment(txHash: `0x${string}`, expectedPayer: `0x${stri
  *   "payer": "0x..."           // Payer address
  * }
  */
-app.post("/mint", async (req, res) => {
+app.post("/mint-direct", async (req, res) => {
   try {
     const { paymentTxHash, payer } = req.body;
 
@@ -173,6 +477,9 @@ app.post("/mint", async (req, res) => {
 
     const txHashBytes32 = paymentTxHash as `0x${string}`;
     const payerAddress = payer as `0x${string}`;
+
+    console.log(`💰 Traditional mint request for ${payerAddress}`);
+    console.log(`   Payment TX: ${paymentTxHash}`);
 
     // Check if already processed
     if (processedTxs.has(paymentTxHash)) {
@@ -232,7 +539,7 @@ app.post("/mint", async (req, res) => {
 
     // Get gas price with buffer to avoid underpriced errors
     const gasPrice = await publicClient.getGasPrice();
-    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 120n) / 100n : 1000000n; // Min 0.001 gwei
+    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 120n) / 100n : 1000000n;
     
     console.log(`⛽ Gas price: ${gasPrice.toString()} (buffered: ${gasPriceWithBuffer.toString()})`);
 
@@ -243,19 +550,19 @@ app.post("/mint", async (req, res) => {
       abi: tokenAbi,
       functionName: "mint",
       args: [payerAddress, txHashBytes32],
-      gas: 200000n, // Explicit gas limit
-      gasPrice: gasPriceWithBuffer, // Use buffered gas price to avoid underpriced errors
+      gas: 200000n,
+      gasPrice: gasPriceWithBuffer,
     });
 
     console.log(`✅ Mint transaction sent: ${hash}`);
-    console.log(`   View on Basescan: https://sepolia.basescan.org/tx/${hash}`);
+    console.log(`   View on Basescan: https://${network === 'base-sepolia' ? 'sepolia.' : ''}basescan.org/tx/${hash}`);
 
     // Wait for transaction confirmation with timeout
     console.log(`⏳ Waiting for confirmation...`);
     const receipt = await publicClient.waitForTransactionReceipt({ 
       hash,
       confirmations: 1,
-      timeout: 60_000, // 60 seconds timeout
+      timeout: 60_000,
     });
     
     console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
@@ -265,7 +572,7 @@ app.post("/mint", async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Tokens minted successfully",
+      message: "Tokens minted successfully (traditional payment)",
       payer,
       amount: mintAmountPerPayment.toString(),
       mintTxHash: hash,
@@ -275,7 +582,6 @@ app.post("/mint", async (req, res) => {
   } catch (error: any) {
     console.error("❌ Mint error:", error.message);
     
-    // Check if it's a MaxSupplyExceeded error
     if (error.message?.includes("MaxSupplyExceeded") || error.message?.includes("MaxMintCountExceeded")) {
       return res.status(400).json({
         error: "Maximum supply exceeded",
@@ -283,445 +589,33 @@ app.post("/mint", async (req, res) => {
       });
     }
     
-    // Check if it's a nonce/gas price error
-    if (error.message?.includes("replacement transaction underpriced") || 
-        error.message?.includes("nonce too low") ||
-        error.message?.includes("already known")) {
-      return res.status(409).json({
-        error: "Transaction pending",
-        message: "A transaction is already pending. Please wait a moment and try again.",
-        details: "Previous transaction may still be processing",
-      });
-    }
-    
-    // Check if already minted
-    if (error.message?.includes("AlreadyMinted")) {
-      return res.status(400).json({
-        error: "Already minted",
-        message: "Tokens have already been minted for this payment",
-      });
-    }
-    
-    // Check for timeout
     if (error.message?.includes("timeout") || error.name === "TimeoutError") {
       return res.status(504).json({
         error: "Transaction timeout",
-        message: "Transaction was sent but confirmation timed out. It may still be processing.",
-        tip: "Check the transaction status on Basescan or try again in a minute",
+        message: "Transaction was sent but confirmation timed out",
       });
     }
     
-    // Check for insufficient funds
     if (error.message?.includes("insufficient funds")) {
       return res.status(400).json({
         error: "Insufficient funds",
         message: "Server does not have enough ETH for gas fees",
-        tip: "Please send some ETH to the server address",
+      });
+    }
+
+    if (error.message?.includes("Valid USDC payment not found")) {
+      return res.status(400).json({
+        error: "Invalid payment",
+        message: "USDC payment verification failed",
+        details: error.message,
       });
     }
     
     return res.status(500).json({
       error: "Failed to mint tokens",
       details: error.message,
-      tip: "Check that the server address has MINTER_ROLE and sufficient ETH for gas",
     });
   }
-});
-
-/**
- * Process a single gasless mint (called by queue)
- */
-async function processGaslessMint(authorization: any) {
-  const { from, to, value, validAfter, validBefore, nonce, signature } = authorization;
-
-  if (!from || !to || !value || !validAfter || !validBefore || !nonce || !signature) {
-    throw new Error("Invalid authorization format");
-  }
-
-  // Validate recipient is the payTo address
-  if (to.toLowerCase() !== payTo.toLowerCase()) {
-    throw new Error(`Invalid recipient address. Expected: ${payTo}, received: ${to}`);
-  }
-
-  // Validate payment amount
-  const requiredAmountWei = parseUnits(requiredPayment, 6);
-  if (BigInt(value) < requiredAmountWei) {
-    throw new Error(`Insufficient payment amount. Required: ${requiredAmountWei.toString()}, received: ${value}`);
-  }
-
-  // Check if authorization has been used
-  const authUsed = await publicClient.readContract({
-    address: usdcContractAddress,
-    abi: usdcAbi,
-    functionName: "authorizationState",
-    args: [from as `0x${string}`, nonce as `0x${string}`],
-  });
-
-  if (authUsed) {
-    throw new Error("Authorization already used");
-  }
-
-  // Split signature into v, r, s
-  const sig = signature as `0x${string}`;
-  const r = sig.slice(0, 66) as `0x${string}`;
-  const s = `0x${sig.slice(66, 130)}` as `0x${string}`;
-  let v = parseInt(sig.slice(130, 132), 16);
-
-  // Normalize v value: some wallets return 0/1, USDC expects 27/28
-  if (v < 27) {
-    v += 27;
-    console.log(`   ⚠️  Normalized v from ${v - 27} to ${v}`);
-  }
-
-  console.log(`💳 Processing gasless USDC transfer...`);
-  console.log(`   From: ${from}`);
-  console.log(`   To: ${to}`);
-  console.log(`   Amount: ${value} (${formatUnits(BigInt(value), 6)} USDC)`);
-  console.log(`   ValidAfter: ${validAfter}`);
-  console.log(`   ValidBefore: ${validBefore} (${new Date(Number(validBefore) * 1000).toISOString()})`);
-  console.log(`   Nonce: ${nonce}`);
-  console.log(`   Signature: ${sig}`);
-  console.log(`   Signature length: ${sig.length}`);
-  console.log(`   v: ${v}, r: ${r.slice(0, 20)}..., s: ${s.slice(0, 20)}...`);
-
-  // Validate signature format
-  if (sig.length !== 132) {
-    throw new Error(`Invalid signature format. Signature must be 132 characters (including 0x), got ${sig.length}`);
-  }
-
-  // Acquire nonce for USDC transfer
-  const { nonce: txNonce, release: releaseTransferNonce } = await nonceManager.acquireNonce();
-  
-  let transferHash: `0x${string}`;
-  let transferGasPrice: bigint;
-  try {
-    // Get gas price with buffer for USDC transfer
-    transferGasPrice = await publicClient.getGasPrice();
-    const transferGasPriceBuffered = transferGasPrice > 0n ? (transferGasPrice * 150n) / 100n : 1000000n; // 1.5x buffer
-    console.log(`⛽ Gas price: ${transferGasPrice.toString()} (buffered: ${transferGasPriceBuffered.toString()})`);
-    console.log(`   Using nonce: ${txNonce}`);
-
-    // Execute transferWithAuthorization
-    console.log(`   Executing transferWithAuthorization...`);
-    const transferArgs = [
-      from as `0x${string}`,
-      to as `0x${string}`,
-      BigInt(value),
-      BigInt(validAfter),
-      BigInt(validBefore),
-      nonce as `0x${string}`,
-      v,
-      r,
-      s,
-    ] as const;
-    
-    transferHash = await walletClient.writeContract({
-      address: usdcContractAddress,
-      abi: usdcAbi,
-      functionName: "transferWithAuthorization",
-      args: transferArgs,
-      gas: 150000n,
-      gasPrice: transferGasPriceBuffered,
-      nonce: txNonce,
-    });
-
-    // Track transaction in monitor for auto gas acceleration
-    txMonitor.trackTransaction(
-      transferHash,
-      txNonce,
-      transferGasPriceBuffered,
-      150000n,
-      usdcContractAddress,
-      'transferWithAuthorization',
-      transferArgs as any
-    );
-
-    // Record pending transaction in database
-    dbUtils.recordPendingTx(txNonce, transferHash, account.address, usdcContractAddress, 'usdc_transfer');
-  } catch (error) {
-    releaseTransferNonce();
-    throw error;
-  }
-
-  console.log(`✅ USDC transfer submitted: ${transferHash}`);
-  console.log(`   Waiting for confirmation (monitor will auto-accelerate if needed)...`);
-
-  // Wait for USDC transfer confirmation (monitor handles gas acceleration)
-  let transferReceipt;
-  try {
-    transferReceipt = await publicClient.waitForTransactionReceipt({ 
-      hash: transferHash,
-      confirmations: 1,
-      timeout: 120_000, // Increased timeout since monitor handles acceleration
-    });
-    
-    // Release nonce after confirmation
-    releaseTransferNonce();
-    
-    // Refresh nonce from chain
-    await nonceManager.refreshNonce();
-  } catch (receiptError: any) {
-    console.error(`❌ Failed to get transfer receipt:`, receiptError.message);
-    releaseTransferNonce();
-    dbUtils.updateTxStatus(transferHash, 'failed', receiptError.message);
-    throw new Error(`Failed to confirm USDC transfer: ${receiptError.message}`);
-  }
-
-  if (transferReceipt.status !== "success") {
-    console.error(`❌ USDC transfer failed (reverted)`);
-    console.error(`   Transaction hash: ${transferHash}`);
-    console.error(`   View on Basescan: https://sepolia.basescan.org/tx/${transferHash}`);
-    
-    // Update database
-    dbUtils.updateTxStatus(transferHash, 'failed', 'Transaction reverted');
-    
-    throw new Error("USDC transfer failed (reverted). Check Basescan for revert reason.");
-  }
-
-  // Update database with success
-  dbUtils.updateTxStatus(transferHash, 'confirmed');
-  console.log(`✅ USDC transfer confirmed at block ${transferReceipt.blockNumber}`);
-
-  // Use the transfer txHash for minting (to prevent double-minting)
-  const txHashBytes32 = transferHash as `0x${string}`;
-  const payerAddress = from as `0x${string}`;
-
-  // Check if already minted in DB
-  const existingPayment = dbUtils.isPaymentProcessed(transferHash);
-  if (existingPayment) {
-    return {
-      success: true,
-      message: "Tokens already minted for this payment",
-      payer: from,
-      paymentTxHash: transferHash,
-      mintTxHash: existingPayment.mint_tx_hash,
-      gasless: true,
-    };
-  }
-
-  // Check if already minted in-memory cache
-  if (processedTxs.has(transferHash)) {
-    return {
-      success: true,
-      message: "Tokens already minted for this payment",
-      payer: from,
-      paymentTxHash: transferHash,
-      gasless: true,
-    };
-  }
-
-  const alreadyMinted = await publicClient.readContract({
-    address: tokenContractAddress,
-    abi: tokenAbi,
-    functionName: "hasMinted",
-    args: [txHashBytes32],
-  });
-
-  if (alreadyMinted) {
-    processedTxs.add(transferHash);
-    return {
-      success: true,
-      message: "Tokens already minted for this payment",
-      payer: from,
-      paymentTxHash: transferHash,
-      gasless: true,
-    };
-  }
-
-  // Check remaining supply
-  const [remainingSupply, mintAmountPerPayment] = await Promise.all([
-    publicClient.readContract({
-      address: tokenContractAddress,
-      abi: tokenAbi,
-      functionName: "remainingSupply",
-    }),
-    publicClient.readContract({
-      address: tokenContractAddress,
-      abi: tokenAbi,
-      functionName: "mintAmount",
-    }),
-  ]);
-
-  if (remainingSupply < mintAmountPerPayment) {
-    throw new Error(`Maximum supply reached. Remaining: ${remainingSupply.toString()}`);
-  }
-
-  // Acquire nonce for mint transaction
-  const { nonce: mintNonce, release: releaseMintNonce } = await nonceManager.acquireNonce();
-  
-  let mintHash: `0x${string}`;
-  try {
-    // Get gas price with buffer for mint
-    const mintGasPrice = await publicClient.getGasPrice();
-    const mintGasPriceBuffered = mintGasPrice > 0n ? (mintGasPrice * 150n) / 100n : 1000000n; // 1.5x buffer
-    console.log(`⛽ Mint gas price: ${mintGasPrice.toString()} (buffered: ${mintGasPriceBuffered.toString()})`);
-    console.log(`   Using nonce: ${mintNonce}`);
-
-    // Mint tokens
-    console.log(`🎨 Minting tokens to ${payerAddress}...`);
-    const mintArgs = [payerAddress, txHashBytes32] as const;
-    
-    mintHash = await walletClient.writeContract({
-      address: tokenContractAddress,
-      abi: tokenAbi,
-      functionName: "mint",
-      args: mintArgs,
-      gas: 200000n,
-      gasPrice: mintGasPriceBuffered,
-      nonce: mintNonce,
-    });
-
-    // Track transaction in monitor for auto gas acceleration
-    txMonitor.trackTransaction(
-      mintHash,
-      mintNonce,
-      mintGasPriceBuffered,
-      200000n,
-      tokenContractAddress,
-      'mint',
-      mintArgs as any
-    );
-
-    // Record pending transaction in database
-    dbUtils.recordPendingTx(mintNonce, mintHash, account.address, tokenContractAddress, 'mint');
-    
-    console.log(`✅ Mint transaction sent: ${mintHash}`);
-  } catch (error) {
-    releaseMintNonce();
-    throw error;
-  }
-
-  // Wait for mint confirmation (monitor handles gas acceleration)
-  let mintReceipt;
-  try {
-    mintReceipt = await publicClient.waitForTransactionReceipt({ 
-      hash: mintHash,
-      confirmations: 1,
-      timeout: 120_000, // Increased timeout
-    });
-    
-    // Release nonce after confirmation
-    releaseMintNonce();
-    
-    // Refresh nonce from chain
-    await nonceManager.refreshNonce();
-    
-    // Update database
-    dbUtils.updateTxStatus(mintHash, 'confirmed');
-  } catch (error: any) {
-    releaseMintNonce();
-    dbUtils.updateTxStatus(mintHash, 'failed', error.message);
-    throw error;
-  }
-
-  console.log(`✅ Mint confirmed at block ${mintReceipt.blockNumber}`);
-
-  // Mark as processed in memory and database
-  processedTxs.add(transferHash);
-  dbUtils.recordProcessedPayment(
-    transferHash,
-    payerAddress,
-    mintHash,
-    mintAmountPerPayment.toString()
-  );
-
-  return {
-    success: true,
-    message: "Tokens minted successfully (gasless!)",
-    payer: from,
-    amount: mintAmountPerPayment.toString(),
-    mintTxHash: mintHash,
-    paymentTxHash: transferHash,
-    blockNumber: mintReceipt.blockNumber.toString(),
-    gasless: true,
-  };
-}
-
-/**
- * Gasless mint endpoint using EIP-3009
- * Adds request to queue and returns request ID for status tracking
- */
-app.post("/mint-gasless", async (req, res) => {
-  try {
-    const { authorization } = req.body;
-
-    if (!authorization) {
-      return res.status(400).json({
-        error: "Missing authorization",
-      });
-    }
-
-    // Basic validation
-    const { from, to, value, validAfter, validBefore, nonce, signature } = authorization;
-    if (!from || !to || !value || !validAfter || !validBefore || !nonce || !signature) {
-      return res.status(400).json({
-        error: "Invalid authorization format",
-      });
-    }
-
-    // Add to queue (returns immediately)
-    const requestId = txQueue.addRequest(authorization);
-    const queuePosition = txQueue.getQueueLength();
-
-    console.log(`📥 Queued mint request ${requestId} (position: ${queuePosition})`);
-
-    return res.status(202).json({
-      success: true,
-      message: "Request queued for processing",
-      requestId,
-      queuePosition,
-      estimatedWaitSeconds: queuePosition * 15,
-      statusEndpoint: `/mint-status/${requestId}`,
-    });
-  } catch (error: any) {
-    console.error("❌ Failed to queue mint request:", error.message);
-    return res.status(500).json({
-      error: "Failed to queue request",
-      details: error.message,
-    });
-  }
-});
-
-/**
- * Check status of a queued mint request
- */
-app.get("/mint-status/:requestId", (req, res) => {
-  const { requestId } = req.params;
-  const request = txQueue.getStatus(requestId);
-
-  if (!request) {
-    return res.status(404).json({
-      error: "Request not found",
-      message: "Request ID not found or has expired (requests expire after 5 minutes)",
-    });
-  }
-
-  const response: any = {
-    id: request.id,
-    status: request.status,
-    queuePosition: txQueue.getPosition(request.id),
-    retries: request.retries,
-    timestamp: request.timestamp,
-    waitingTimeMs: Date.now() - request.timestamp,
-  };
-
-  if (request.status === 'completed' && request.result) {
-    response.result = request.result;
-  }
-
-  if (request.status === 'failed' && request.error) {
-    response.error = request.error;
-  }
-
-  if (request.txHash) {
-    response.txHash = request.txHash;
-  }
-
-  if (request.mintTxHash) {
-    response.mintTxHash = request.mintTxHash;
-  }
-
-  return res.json(response);
 });
 
 // Health check endpoint (no payment required)
@@ -731,6 +625,7 @@ app.get("/health", (req, res) => {
     network,
     tokenContract: tokenContractAddress,
     payTo,
+    protocol: "x402",
   });
 });
 
@@ -787,7 +682,8 @@ app.get("/info", async (req, res) => {
     const mintProgress = Number(mintCount) / Number(maxMintCount) * 100;
 
     res.json({
-      price: "1 USDC",
+      protocol: "x402",
+      price: `${requiredPayment} USDC`,
       tokensPerPayment: mintAmount.toString(),
       maxSupply: maxSupply.toString(),
       totalSupply: totalSupply.toString(),
@@ -797,7 +693,6 @@ app.get("/info", async (req, res) => {
       maxMintCount: maxMintCount.toString(),
       mintProgress: `${mintProgress.toFixed(2)}%`,
       liquidityDeployed,
-      liquidityDeployTrigger: `After ${maxMintCount.toString()} mints`,
       network,
       tokenContract: tokenContractAddress,
       payTo,
@@ -807,59 +702,42 @@ app.get("/info", async (req, res) => {
   }
 });
 
-// Handle queue processing
-txQueue.on('process', async (request: MintRequest, resolve: any, reject: any) => {
-  try {
-    const result = await processGaslessMint(request.authorization);
-    request.txHash = result.paymentTxHash;
-    request.mintTxHash = result.mintTxHash;
-    resolve(result);
-  } catch (error) {
-    reject(error);
-  }
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  txMonitor.stop();
-  txQueue.stop();
-  process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  txMonitor.stop();
-  txQueue.stop();
-  process.exit(0);
-});
-
 const PORT = process.env.PORT || 4021;
 
 app.listen(PORT, () => {
-  console.log(`🚀 Token Mint Server running on port ${PORT}`);
+  console.log(`🚀 x402 Token Mint Server running on port ${PORT}`);
   console.log(`Network: ${network}`);
   console.log(`Token Contract: ${tokenContractAddress}`);
   console.log(`Pay To Address: ${payTo}`);
   console.log(`Server Address: ${account.address}`);
   console.log(`Required Payment: ${requiredPayment} USDC`);
-  console.log(`\n📊 System Status:`);
-  console.log(`  - Transaction Monitor: ACTIVE`);
-  console.log(`  - Request Queue: ACTIVE`);
-  console.log(`  - Gas Acceleration: 5s threshold, 1.2x multiplier, max 5 attempts`);
+  console.log(`Protocol: x402 (HTTP 402 Payment Required)`);
+  
+  // Show facilitator configuration
+  if (network === "base-sepolia") {
+    console.log(`Facilitator: Public (https://x402.org/facilitator)`);
+    console.log(`  ℹ️  Testnet mode - no CDP API keys required`);
+  } else {
+    console.log(`Facilitator: Coinbase CDP`);
+    console.log(`  ✓ CDP API Key ID: ${cdpApiKeyId?.substring(0, 8)}...`);
+    console.log(`  ℹ️  Mainnet mode - using Coinbase Developer Platform`);
+    console.log(`  📊 Your endpoint will be listed in x402 Bazaar`);
+  }
+  
   console.log(`\nEndpoints:`);
-  console.log(`  POST /mint - Mint tokens after USDC payment`);
-  console.log(`  POST /mint-gasless - Queue gasless mint (returns requestId) 🆓`);
-  console.log(`  GET /mint-status/:requestId - Check mint request status`);
+  console.log(`  POST /mint - Mint tokens (requires x402 payment) 💳`);
+  console.log(`  POST /mint-direct - Mint tokens (traditional USDC payment) 💰`);
   console.log(`  GET /health - Health check`);
   console.log(`  GET /info - Get mint info`);
-  console.log(`\nUsage (Traditional):`);
+  console.log(`\nUsage (x402 protocol):`);
+  console.log(`  1. Request POST /mint`);
+  console.log(`  2. Server responds with 402 Payment Required + instructions`);
+  console.log(`  3. Client completes payment via x402 protocol`);
+  console.log(`  4. Client retries POST /mint with X-PAYMENT header`);
+  console.log(`  5. ✨ Server verifies payment and mints tokens!`);
+  console.log(`\nUsage (traditional):`);
   console.log(`  1. Send ${requiredPayment} USDC to ${payTo}`);
-  console.log(`  2. POST to /mint with { "paymentTxHash": "0x...", "payer": "0x..." }`);
-  console.log(`\nUsage (Gasless + Queue):`);
-  console.log(`  1. Sign EIP-3009 authorization`);
-  console.log(`  2. POST to /mint-gasless → Get requestId`);
-  console.log(`  3. Poll GET /mint-status/:requestId`);
-  console.log(`  4. ✨ Pay ZERO gas fees!`);
+  console.log(`  2. POST to /mint-direct with { "paymentTxHash": "0x...", "payer": "0x..." }`);
+  console.log(`  3. ✨ Server verifies payment and mints tokens!`);
 });
 

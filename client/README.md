@@ -1,279 +1,245 @@
-# Token Mint Client
+# x402 Token Mint Client
 
-简化版的代币 Mint 客户端，不依赖本地 x402 包，直接使用标准库实现完整的支付和 mint 流程。
+基于 Coinbase 官方 x402 协议的代币 Mint 客户端。
 
-## 功能
+## 🚀 快速开始
 
-- 自动发送 USDC 支付
-- 调用服务器 API 进行 mint
-- 完整的错误处理
-- 余额检查和交易确认
+查看 [QUICK_START_X402.md](./QUICK_START_X402.md) 获取 5 分钟快速上手指南。
+
+## 特性
+
+✅ **Coinbase 官方 x402 实现**
+- `x402-fetch` - 原生 fetch API 包装器（默认）
+- `x402-axios` - Axios 拦截器
+- 自动处理 402 响应和支付流程
+
+⚡ **无需 USDC，无需 gas**
+- 只需签名，不发送链上交易
+- 使用 EIP-712 签名验证
+- Facilitator 验证支付
+
+📚 **完整文档**
+- [QUICK_START_X402.md](./QUICK_START_X402.md) - 快速开始
+- [X402_COINBASE_GUIDE.md](./X402_COINBASE_GUIDE.md) - 完整指南
+- [X402_SUMMARY.md](./X402_SUMMARY.md) - 实现总结
+
+## 安装
+
+```bash
+npm install
+```
+
+## 配置
+
+复制环境变量模板：
+
+```bash
+cp env.x402.example .env
+```
+
+编辑 `.env`:
+
+```bash
+NETWORK=base-sepolia              # 或 base
+PRIVATE_KEY=0x...                 # 你的私钥（仅用于签名）
+SERVER_URL=http://localhost:4021  # 服务端地址
+```
+
+> **注意**: 私钥只用于签名，不需要钱包里有 USDC 或 ETH！
+
+## 运行
+
+### 方式 1: 使用测试脚本（推荐）
+
+```bash
+./test-x402.sh
+```
+
+选择实现：
+1. x402-axios (Axios 拦截器)
+2. x402-fetch (Fetch 包装器) - **默认**
+3. 手动实现 (需要 USDC)
+
+### 方式 2: 直接运行
+
+```bash
+# 默认 (x402-fetch)
+npm start
+
+# x402-fetch
+npm run start:fetch
+
+# x402-axios
+npm run start:axios
+
+# 手动实现 (需要 USDC)
+npm run start:manual
+```
+
+## 实现方式
+
+### 1. x402-fetch（默认，推荐）
+
+**文件**: `index-x402-fetch.ts` (复制为 `index.ts`)
+
+**特性**:
+- ✅ 原生 fetch API
+- ✅ 轻量级，最小依赖
+- ✅ 自动处理 402 响应
+- ✅ 不需要 USDC 或 gas
+
+**使用**:
+```typescript
+import { wrapFetchWithPayment } from "x402-fetch";
+
+const walletClient = createWalletClient({...}).extend(publicActions);
+const fetchWithPayment = wrapFetchWithPayment(
+  fetch, 
+  walletClient as any,
+  BigInt(1_500_000) // Max 1.5 USDC
+);
+
+const response = await fetchWithPayment(`${serverUrl}/mint`, {
+  method: "POST",
+  body: JSON.stringify({ payer: account.address }),
+});
+```
+
+### 2. x402-axios
+
+**文件**: `index-x402-standard.ts`
+
+**特性**:
+- ✅ Axios 拦截器
+- ✅ 完整的 HTTP 客户端功能
+- ✅ 自动处理 402 响应
+- ✅ 不需要 USDC 或 gas
+
+**使用**:
+```typescript
+import { withPaymentInterceptor } from "x402-axios";
+
+const walletClient = createWalletClient({...}).extend(publicActions);
+const axiosWithPayment = withPaymentInterceptor(
+  axios.create(), 
+  walletClient as any
+);
+
+const response = await axiosWithPayment.post(`${serverUrl}/mint`, {
+  payer: account.address,
+});
+```
+
+### 3. 手动实现（参考）
+
+**文件**: `index-x402-working.ts`
+
+**特性**:
+- 完整控制整个流程
+- 实际发送 USDC 交易
+- ❌ 需要 USDC 余额
+- ❌ 需要 gas 费用
+
+**用途**: 学习 x402 协议原理，或需要实际转账的场景
 
 ## 工作流程
 
-1. **获取服务器信息** - 查询服务器配置和代币信息
-2. **发送 USDC 支付** - 向服务器指定地址发送 USDC
-3. **请求 Mint** - 调用服务器 API，提供支付交易哈希
-4. **接收代币** - 服务器验证支付后 mint 代币到你的地址
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-npm install
+```
+客户端请求
+    ↓
+x402 拦截/包装
+    ↓
+检测到 402
+    ↓
+自动签名 (EIP-712)
+    ↓
+自动重试 + X-PAYMENT
+    ↓
+服务端验证
+    ↓
+返回资源
 ```
 
-### 2. 配置环境变量
+**时间**: < 1 秒  
+**成本**: $0
 
-复制 `.env.example` 到 `.env` 并填写配置：
+## 对比
 
-```bash
-cp .env.example .env
-```
+| 特性 | x402 官方 | 手动实现 |
+|------|-----------|----------|
+| 需要 USDC | ❌ 不需要 | ✅ 需要 |
+| 需要 gas | ❌ 不需要 | ✅ 需要 |
+| 代码行数 | ~180 行 | ~315 行 |
+| 响应时间 | ~250ms | 5-20秒 |
+| 实现方式 | EIP-712签名 | USDC转账 |
 
-必需配置：
+## 文件说明
 
-```bash
-# 你的私钥（用于发送 USDC 和接收代币）
-PRIVATE_KEY=0x...
-
-# 服务器 URL
-SERVER_URL=http://localhost:4021
-
-# USDC 合约地址
-USDC_CONTRACT_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e
-
-# 网络
-NETWORK=base-sepolia
-
-# 支付金额（USDC）
-PAYMENT_AMOUNT_USDC=1
-```
-
-### 3. 确保有足够的 USDC
-
-你的钱包需要有：
-- 至少 1 USDC（或配置的支付金额）
-- 少量 ETH 用于 gas
-
-**Base Sepolia 测试网获取 USDC：**
-- 从 Uniswap 测试网 swap 获取
-- 或者从其他 DEX 获取测试 USDC
-
-### 4. 运行客户端
-
-```bash
-npm start
-```
-
-## 使用示例
-
-**完整流程：**
-
-```bash
-# 1. 确保服务器在运行
-curl http://localhost:4021/health
-
-# 2. 运行客户端
-npm start
-```
-
-**输出示例：**
-
-```
-🚀 Token Mint Client
-====================
-
-Network: base-sepolia
-Your address: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb2
-Server: http://localhost:4021
-
-📋 Step 1: Getting server info...
-   Token contract: 0x1234567890123456789012345678901234567890
-   Pay to address: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb2
-   Tokens per payment: 10000
-   Remaining supply: 990000
-
-💰 Step 2: Sending 1 USDC payment...
-💸 Sending 1 USDC to 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb2...
-   Your USDC balance: 10.5 USDC
-   Transaction hash: 0xabc123...
-   Waiting for confirmation...
-   ✅ USDC transfer confirmed at block 12345
-
-🎨 Step 3: Minting tokens...
-🎫 Requesting token mint from server...
-
-✨ SUCCESS! Tokens minted!
-============================
-Payer: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb2
-Amount: 10000 tokens
-Payment TX: 0xabc123...
-Mint TX: 0xdef456...
-Block: 12346
-
-🎉 All done!
-```
-
-## API 调用
-
-客户端会调用服务器的以下端点：
-
-### GET `/info` 或 `/health`
-
-获取服务器信息：
-
-```bash
-curl http://localhost:4021/info
-```
-
-### POST `/mint`
-
-请求 mint 代币：
-
-```bash
-curl -X POST http://localhost:4021/mint \
-  -H "Content-Type: application/json" \
-  -d '{
-    "paymentTxHash": "0xabc123...",
-    "payer": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb2"
-  }'
-```
-
-## 错误处理
-
-客户端会处理以下错误情况：
-
-### 余额不足
-
-```
-❌ Error: Insufficient USDC balance. You have 0.5 USDC but need 1 USDC
-
-💡 Tip: Get USDC from a faucet or DEX
-   Base Sepolia USDC: 0x036CbD53842c5426634e7929541eC2318f3dCF7e
-```
-
-### 服务器错误
-
-```
-❌ Error: Request failed with status code 400
-Server response: {
-  error: "Maximum supply reached",
-  remainingSupply: "0",
-  message: "Cannot mint more tokens, supply cap has been reached"
-}
-```
-
-### 交易失败
-
-```
-❌ Error: USDC transfer failed
-```
-
-## 手动 Mint（无 USDC 自动发送）
-
-如果不配置 `USDC_CONTRACT_ADDRESS`，客户端会提示手动操作：
-
-```
-⚠️  USDC_CONTRACT_ADDRESS not configured in .env
-   Please manually send USDC and provide the transaction hash.
-
-   Send 1 USDC to: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb2
-   Then run: curl -X POST http://localhost:4021/mint \
-     -H "Content-Type: application/json" \
-     -d '{"paymentTxHash": "0x...", "payer": "0x742d35..."}'
-```
-
-## 开发
-
-```bash
-# 安装依赖
-npm install
-
-# 运行客户端
-npm start
-
-# 编译 TypeScript
-npm run build
-```
-
-## 配置说明
-
-### 环境变量
-
-| 变量 | 必需 | 默认值 | 说明 |
-|------|------|--------|------|
-| `PRIVATE_KEY` | ✅ | - | 你的钱包私钥 |
-| `SERVER_URL` | ❌ | `http://localhost:4021` | 服务器地址 |
-| `USDC_CONTRACT_ADDRESS` | ⚠️ | - | USDC 合约地址（不配置则手动支付） |
-| `NETWORK` | ❌ | `base-sepolia` | 网络（base-sepolia 或 base） |
-| `PAYMENT_AMOUNT_USDC` | ❌ | `1` | 支付金额（USDC） |
-
-### 网络配置
-
-**Base Sepolia (测试网):**
-- USDC: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
-- RPC: `https://sepolia.base.org`
-
-**Base Mainnet (主网):**
-- USDC: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
-- RPC: `https://mainnet.base.org`
-
-## 依赖项
-
-主要依赖：
-- `axios` - HTTP 客户端
-- `viem` - 以太坊交互库
-- `dotenv` - 环境变量管理
-
-## 安全注意事项
-
-1. **私钥安全**：永远不要提交 `.env` 文件到 git
-2. **测试网优先**：先在 Base Sepolia 测试
-3. **余额检查**：确保有足够的 USDC 和 ETH
-4. **服务器验证**：确保连接到正确的服务器地址
+| 文件 | 说明 |
+|------|------|
+| `index.ts` | 默认入口（x402-fetch） |
+| `index-x402-fetch.ts` | x402-fetch 实现 ⭐ |
+| `index-x402-standard.ts` | x402-axios 实现 ⭐ |
+| `index-x402-working.ts` | 手动 USDC 转账实现（参考） |
+| `test-x402.sh` | 交互式测试脚本 |
+| `QUICK_START_X402.md` | 快速开始指南 |
+| `X402_COINBASE_GUIDE.md` | 完整使用文档 |
+| `X402_SUMMARY.md` | 实现总结 |
 
 ## 常见问题
 
-### Q: 没有 USDC 怎么办？
+### Q: 钱包需要有 USDC 吗？
 
-**Base Sepolia 测试网：**
-1. 从 [Base Sepolia Faucet](https://portal.cdp.coinbase.com/products/faucet) 获取 ETH
-2. 在 Uniswap 或其他 DEX 上 swap ETH -> USDC
+**A: 不需要！** Coinbase 官方 x402 使用签名验证，不发送实际交易。
 
-**Base Mainnet：**
-1. 从交易所购买 USDC
-2. 提现到 Base 网络
+### Q: 需要支付 gas 费吗？
 
-### Q: 交易卡住了怎么办？
+**A: 不需要！** 只签名，不上链。
 
-检查：
-1. 网络状态 - 是否连接正确的网络
-2. Gas 价格 - 是否足够
-3. 余额 - 是否有足够的 ETH 支付 gas
+### Q: 如何选择实现？
 
-### Q: 如何查看我的代币余额？
+**A:**
+- **x402-fetch**: 喜欢原生 API，追求轻量 ⭐
+- **x402-axios**: 已使用 axios，需要拦截器
+- **手动实现**: 学习协议原理，或需要实际转账
 
-```bash
-# 使用 viem 或其他工具查询 ERC20 余额
-cast balance --erc20 <TOKEN_ADDRESS> <YOUR_ADDRESS> --rpc-url https://sepolia.base.org
+### Q: 出现 TypeScript 错误？
+
+**A:** 使用 `as any` 类型断言绕过 viem/x402 兼容性问题：
+```typescript
+walletClient as any
 ```
 
-## 与原版的区别
+## 调试
 
-**原版（使用 x402-axios）：**
-- 集成 x402 支付协议
-- 自动处理支付头和签名
-- 使用 x402 facilitator 服务
+查看服务端日志：
+```bash
+cd ../server
+npm start
+# 查看 🎨 POST /mint received 等日志
+```
 
-**重构版（独立）：**
-- 不依赖本地 x402 包
-- 手动发送 USDC 交易
-- 直接调用服务器 REST API
-- 更直观的工作流程
+查看支付响应：
+```typescript
+const paymentResponse = response.headers.get("x-payment-response");
+console.log('Payment:', decodeXPaymentResponse(paymentResponse));
+```
+
+## 技术栈
+
+- `x402-fetch` ^0.6.6 - Fetch 包装器
+- `x402-axios` ^0.6.6 - Axios 拦截器
+- `@coinbase/x402` ^0.6.6 - 核心库
+- `viem` ^2.38.4 - 以太坊交互
+- `axios` ^1.7.9 - HTTP 客户端
+
+## 参考资源
+
+- 📖 [Coinbase x402 文档](https://docs.cdp.coinbase.com/x402/quickstart-for-buyers)
+- 📦 [x402-fetch npm](https://www.npmjs.com/package/x402-fetch)
+- 📦 [x402-axios npm](https://www.npmjs.com/package/x402-axios)
+- 💬 [CDP Discord](https://discord.gg/cdp)
 
 ## License
 
 Apache-2.0
-

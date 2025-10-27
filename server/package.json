@@ -1,7 +1,7 @@
 {
   "name": "x402-token-mint-server",
   "version": "1.0.0",
-  "description": "Token minting server - pay 1 USDC to mint tokens",
+  "description": "Token minting server - pay 1 USDC to mint tokens (x402 enabled)",
   "main": "index.ts",
   "scripts": {
     "dev": "tsx watch index.ts",
@@ -13,13 +13,15 @@
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.22.0",
+    "@coinbase/x402": "latest",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "better-sqlite3": "^12.4.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "viem": "^2.21.54"
+    "viem": "^2.21.54",
+    "x402-express": "latest"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
