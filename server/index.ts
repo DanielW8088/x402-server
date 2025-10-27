@@ -1,5 +1,6 @@
 import { config } from "dotenv";
 import express from "express";
+import cors from "cors";
 import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, decodeEventLog } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
@@ -62,6 +63,14 @@ const usdcAbi = parseAbi([
 ]);
 
 const app = express();
+
+// Enable CORS for all origins in development
+app.use(cors({
+  origin: '*', // Allow all origins in development. In production, specify your domain.
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
+}));
+
 app.use(express.json());
 
 // Track processed transactions to prevent double-minting
