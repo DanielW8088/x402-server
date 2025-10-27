@@ -1,0 +1,21 @@
+node_modules/
+.env
+dist/
+*.log
+
+# Hardhat
+cache/
+artifacts/
+typechain-types/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

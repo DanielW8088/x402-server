@@ -1,0 +1,34 @@
+{
+  "name": "x402-mint-token-contracts",
+  "version": "1.0.0",
+  "description": "Smart contracts for x402 token minting",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network baseSepolia",
+    "deploy:mainnet": "hardhat run scripts/deploy.js --network base",
+    "deploy:x402:sepolia": "hardhat run scripts/deployX402Token.js --network baseSepolia",
+    "deploy:x402:mainnet": "hardhat run scripts/deployX402Token.js --network base",
+    "deploy:payx:sepolia": "hardhat run scripts/deployPAYX.js --network baseSepolia",
+    "deploy:payx:mainnet": "hardhat run scripts/deployPAYX.js --network base",
+    "grant:sepolia": "hardhat run scripts/grantRole.js --network baseSepolia",
+    "grant:mainnet": "hardhat run scripts/grantRole.js --network base",
+    "status:sepolia": "hardhat run scripts/checkStatus.js --network baseSepolia",
+    "status:mainnet": "hardhat run scripts/checkStatus.js --network base",
+    "status:payx:sepolia": "hardhat run scripts/checkPAYX.js --network baseSepolia",
+    "status:payx:mainnet": "hardhat run scripts/checkPAYX.js --network base",
+    "price:calculate": "node scripts/calculateSqrtPrice.js",
+    "verify": "hardhat verify --network baseSepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0",
+    "dotenv": "^16.4.7"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "@uniswap/v4-core": "github:Uniswap/v4-core",
+    "v4-periphery": "github:Uniswap/v4-periphery",
+    "permit2": "github:Uniswap/permit2"
+  }
+}
+

@@ -1,0 +1,26 @@
+{
+  "name": "x402-token-mint-server",
+  "version": "1.0.0",
+  "description": "Token minting server - pay 1 USDC to mint tokens",
+  "main": "index.ts",
+  "scripts": {
+    "dev": "tsx watch index.ts",
+    "start": "tsx index.ts",
+    "build": "tsc",
+    "address": "tsx getAddress.ts",
+    "check": "tsx checkPendingTx.ts",
+    "check:role": "tsx checkRole.ts"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.22.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "viem": "^2.21.54"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

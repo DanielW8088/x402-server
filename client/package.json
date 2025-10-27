@@ -1,0 +1,21 @@
+{
+  "name": "x402-token-mint-client",
+  "version": "1.0.0",
+  "description": "Client for token minting",
+  "main": "index.ts",
+  "scripts": {
+    "start": "tsx index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "viem": "^2.21.54"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
+
