@@ -2,6 +2,20 @@
 
 简化版的代币 Mint 服务器，不依赖 `x402-express` 包，直接使用 Express + Viem 实现。
 
+## 🔥 两种运行模式
+
+### 1. **标准模式** (index.ts)
+- 单线程处理
+- 适合低并发场景
+- 使用 SQLite 数据库
+
+### 2. **队列模式** (index-queue.ts) ⭐ 推荐
+- **PostgreSQL 队列系统**
+- **批量处理**（10s 处理一批）
+- **完全防止 nonce 冲突**
+- **可扩展架构**
+- 吞吐量：~300 mints/分钟
+
 ## 功能
 
 - ✅ 验证 USDC 支付交易
@@ -9,19 +23,22 @@
 - ✅ 防止重复 mint
 - ✅ 检查供应量上限
 - ✅ **EIP-3009 免 gas 费 mint**（用户无需支付 gas）
-- ✅ **SQLite 数据库持久化**（防止重启丢失数据）
+- ✅ **数据库持久化**（PostgreSQL 或 SQLite）
 - ✅ **Nonce 管理系统**（防止并发冲突）
-- ✅ **并发请求支持**（多人同时 mint 不会失败）
+- ✅ **批量 mint**（使用合约的 batchMint 功能）
+- ✅ **队列可视化**（实时查看队列状态）
 
 ## 快速开始
 
-### 1. 安装依赖
+### 标准模式（单线程）
+
+#### 1. 安装依赖
 
 ```bash
 npm install
 ```
 
-### 2. 配置环境变量
+#### 2. 配置环境变量
 
 复制 `.env.example` 到 `.env` 并填写配置：
 
@@ -51,22 +68,81 @@ NETWORK=base-sepolia
 REQUIRED_PAYMENT_USDC=1
 ```
 
-### 3. 编译并运行
+#### 3. 运行服务器
 
 ```bash
-# 编译 TypeScript
-npm run build
-
-# 运行服务器
-npm start
-
-# 或者开发模式（自动重载）
+# 开发模式
 npm run dev
+
+# 生产模式
+npm start
 ```
+
+### 队列模式（PostgreSQL）⭐ 推荐高并发场景
+
+#### 1. 安装 PostgreSQL
+
+```bash
+# macOS
+brew install postgresql@14
+brew services start postgresql@14
+
+# Ubuntu
+sudo apt install postgresql-14
+sudo systemctl start postgresql
+```
+
+#### 2. 创建数据库
+
+```bash
+psql postgres
+```
+
+```sql
+CREATE DATABASE token_mint;
+CREATE USER mint_user WITH PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE token_mint TO mint_user;
+\q
+```
+
+#### 3. 配置环境变量
+
+```bash
+cp env.queue.example .env
+```
+
+额外配置（相比标准模式）：
+
+```bash
+# PostgreSQL 连接
+DATABASE_URL=postgresql://mint_user:your_password@localhost:5432/token_mint
+```
+
+#### 4. 初始化数据库
+
+```bash
+# 自动创建表结构
+chmod +x scripts/setup-db.sh
+./scripts/setup-db.sh
+```
+
+#### 5. 运行队列模式
+
+```bash
+# 开发模式
+npm run dev:queue
+
+# 生产模式
+npm run start:queue
+```
+
+**详细文档：** 📖 [Queue System Documentation](./QUEUE_SYSTEM.md)
 
 ## API 端点
 
-### POST `/mint`
+### 标准模式 API
+
+#### POST `/mint`
 
 传统模式：用户先支付 USDC，然后 mint 代币。
 
@@ -148,7 +224,7 @@ npm run dev
 }
 ```
 
-### GET `/info`
+#### GET `/info`
 
 获取 mint 信息。
 
@@ -169,6 +245,98 @@ npm run dev
   "liquidityDeployTrigger": "After 100 mints",
   "network": "base-sepolia",
   "tokenContract": "0x..."
+}
+```
+
+### 队列模式 API（额外端点）
+
+#### POST `/mint`
+
+添加 mint 请求到队列（支持所有支付方式）。
+
+**响应示例：**
+
+```json
+{
+  "success": true,
+  "message": "Mint request added to queue",
+  "queueId": "550e8400-e29b-41d4-a716-446655440000",
+  "queuePosition": 5,
+  "payer": "0x...",
+  "estimatedWaitSeconds": 10,
+  "paymentType": "x402"
+}
+```
+
+#### GET `/queue/status`
+
+获取队列统计信息。
+
+**响应示例：**
+
+```json
+{
+  "stats": {
+    "pending_count": 12,
+    "processing_count": 0,
+    "completed_count": 1543,
+    "failed_count": 2,
+    "oldest_pending": "2025-10-27T10:30:00.000Z",
+    "unique_payers_pending": 8
+  },
+  "recentBatches": [
+    {
+      "id": "uuid",
+      "batch_tx_hash": "0x...",
+      "mint_count": 50,
+      "status": "confirmed",
+      "created_at": "...",
+      "confirmed_at": "...",
+      "block_number": "12345"
+    }
+  ],
+  "batchInterval": 10,
+  "maxBatchSize": 50
+}
+```
+
+#### GET `/queue/payer/:address`
+
+查询指定地址的队列状态。
+
+**响应示例：**
+
+```json
+{
+  "payer": "0x...",
+  "requests": [
+    {
+      "id": "uuid",
+      "status": "completed",
+      "queue_position": 3,
+      "created_at": "...",
+      "processed_at": "...",
+      "mint_tx_hash": "0x..."
+    }
+  ]
+}
+```
+
+#### GET `/queue/item/:queueId`
+
+查询特定队列项目状态。
+
+**响应示例：**
+
+```json
+{
+  "id": "uuid",
+  "payer_address": "0x...",
+  "status": "pending",
+  "queue_position": 5,
+  "created_at": "...",
+  "mint_tx_hash": null,
+  "payment_type": "x402"
 }
 ```
 

@@ -5,7 +5,9 @@
   "main": "index.ts",
   "scripts": {
     "dev": "tsx watch index.ts",
+    "dev:queue": "tsx watch index-queue.ts",
     "start": "tsx index.ts",
+    "start:queue": "tsx index-queue.ts",
     "build": "tsc",
     "address": "tsx getAddress.ts",
     "check": "tsx checkPendingTx.ts",
@@ -14,12 +16,12 @@
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.22.0",
     "@coinbase/x402": "latest",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
-    "better-sqlite3": "^12.4.1",
+    "@types/pg": "^8.11.10",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "pg": "^8.13.1",
     "viem": "^2.21.54",
     "x402-express": "latest"
   },
