@@ -19,7 +19,13 @@
     "check:role": "tsx checkRole.ts",
     "db:init": "node init-db.js",
     "db:migrate": "node init-db.js",
-    "queue:config": "node check-queue-config.js"
+    "db:migrate-verification": "psql $DATABASE_URL -f db/add-verification-fields.sql",
+    "queue:config": "node check-queue-config.js",
+    "verify": "tsx scripts/verify-contracts.ts",
+    "verify:base": "tsx scripts/verify-contracts.ts -- --network=base",
+    "verify:sepolia": "tsx scripts/verify-contracts.ts -- --network=base-sepolia",
+    "check-verification": "tsx scripts/check-verification-status.ts",
+    "debug-verification": "node -e \"const{Pool}=require('pg');require('dotenv').config();const a=process.argv[1];if(!a){console.error('Usage: npm run debug-verification <address>');process.exit(1);}const p=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DB_SSL_ENABLED!=='false'?{rejectUnauthorized:false}:false});(async()=>{try{const r=await p.query('SELECT name,symbol,address,constructor_args,verification_error,verification_retry_count FROM deployed_tokens WHERE address=$1',[a.toLowerCase()]);if(r.rows.length>0){const t=r.rows[0];console.log('\\\\n=== CONTRACT:',t.name,'(',t.symbol,')===');console.log('Address:',t.address);console.log('Retries:',t.verification_retry_count||0);console.log('\\\\n=== CONSTRUCTOR ARGS ===');console.log(JSON.stringify(t.constructor_args,null,2));console.log('\\\\n=== ERROR ===');console.log(t.verification_error||'No error');}else{console.log('Contract not found');}await p.end();}catch(e){console.error(e.message);process.exit(1);}})();\" --"
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.22.0",

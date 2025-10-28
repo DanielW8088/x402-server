@@ -320,12 +320,28 @@ export async function saveDeployedToken(
   const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
   const lpDeployerAddress = lpAccount.address;
 
+  // Excess recipient (defaults to deployer if not specified)
+  const excessRecipient = config.excessRecipient || config.deployer;
+
   const mintAmountWei = BigInt(config.mintAmount) * BigInt(10 ** 18);
   const maxSupply = BigInt(2_000_000_000) * BigInt(10 ** 18);
   const totalUserMint = mintAmountWei * BigInt(config.maxMintCount);
   const poolSeedAmount = totalUserMint / BigInt(4);
   const pricePerMintUSDC = BigInt(config.price) * BigInt(10 ** 6);
   const requiredPayment = (poolSeedAmount * pricePerMintUSDC) / mintAmountWei;
+
+  // Store constructor arguments for verification
+  const constructorArgs = {
+    name: config.name,
+    symbol: config.symbol,
+    mintAmount: mintAmountWei.toString(),
+    maxMintCount: config.maxMintCount,
+    paymentToken: paymentTokenAddress,
+    pricePerMint: pricePerMintUSDC.toString(),
+    poolSeedAmount: poolSeedAmount.toString(),
+    excessRecipient: excessRecipient,
+    lpDeployer: lpDeployerAddress
+  };
 
   const query = `
     INSERT INTO deployed_tokens (
@@ -336,9 +352,10 @@ export async function saveDeployedToken(
       payment_seed, pool_seed_amount,
       network, max_supply, total_supply,
       deploy_tx_hash, deploy_block_number,
-      logo_url, description
+      logo_url, description,
+      constructor_args, compiler_version, optimization_runs, via_ir
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
     )
     RETURNING *
   `;
@@ -363,6 +380,10 @@ export async function saveDeployedToken(
     deployResult.blockNumber,
     config.imageUrl || null,
     config.description || null,
+    JSON.stringify(constructorArgs),
+    '0.8.26',
+    200,
+    true
   ];
 
   const result = await pool.query(query, values);
@@ -449,5 +470,132 @@ export async function updateTokenLiquidityDeployed(pool: Pool, address: string) 
   `;
   const result = await pool.query(query, [address.toLowerCase()]);
   return result.rows[0];
+}
+
+/**
+ * Verify a deployed contract on Basescan/Etherscan
+ */
+export async function verifyContract(
+  pool: Pool,
+  tokenAddress: string
+): Promise<{ success: boolean; guid?: string; error?: string }> {
+  // Get token info from database
+  const token = await getToken(pool, tokenAddress);
+  if (!token) {
+    throw new Error(`Token ${tokenAddress} not found in database`);
+  }
+
+  if (!token.constructor_args) {
+    throw new Error(`Token ${tokenAddress} missing constructor_args - cannot verify`);
+  }
+
+  const args = token.constructor_args;
+  const contractsDir = process.env.CONTRACTS_DIR || join(__dirname, '../../../contracts');
+  const network = token.network === 'base-sepolia' ? 'baseSepolia' : 'base';
+
+  try {
+    // Update status to verifying and increment retry count
+    await pool.query(
+      `UPDATE deployed_tokens 
+       SET verification_status = $1, 
+           verification_retry_count = verification_retry_count + 1,
+           verification_last_attempt = NOW()
+       WHERE address = $2`,
+      ['verifying', tokenAddress.toLowerCase()]
+    );
+
+    console.log(`🔍 Verifying contract ${tokenAddress} on ${network}...`);
+    console.log(`   Attempt: ${(token.verification_retry_count || 0) + 1}`);
+
+    // Build verification command with constructor args
+    const verifyCmd = `cd ${contractsDir} && npx hardhat verify --network ${network} ${tokenAddress} \
+      "${args.name}" \
+      "${args.symbol}" \
+      "${args.mintAmount}" \
+      ${args.maxMintCount} \
+      "${args.paymentToken}" \
+      "${args.pricePerMint}" \
+      "${args.poolSeedAmount}" \
+      "${args.excessRecipient}" \
+      "${args.lpDeployer}"`;
+
+    console.log('Verification command:', verifyCmd);
+
+    const { stdout, stderr } = await execAsync(verifyCmd, { timeout: 120000 });
+
+    console.log('Verify stdout:', stdout);
+    if (stderr) console.log('Verify stderr:', stderr);
+
+    // Check if already verified
+    if (stdout.includes('Already Verified')) {
+      await pool.query(
+        'UPDATE deployed_tokens SET verification_status = $1, verified_at = NOW() WHERE address = $2',
+        ['verified', tokenAddress.toLowerCase()]
+      );
+      return { success: true };
+    }
+
+    // Extract verification GUID if present
+    const guidMatch = stdout.match(/GUID:\s*([a-zA-Z0-9]+)/i) || 
+                      stdout.match(/verification ID:\s*([a-zA-Z0-9]+)/i);
+    const guid = guidMatch ? guidMatch[1] : undefined;
+
+    // Check for success
+    if (stdout.includes('Successfully verified') || stdout.includes('Contract source code already verified')) {
+      await pool.query(
+        'UPDATE deployed_tokens SET verification_status = $1, verification_guid = $2, verified_at = NOW() WHERE address = $3',
+        ['verified', guid, tokenAddress.toLowerCase()]
+      );
+      return { success: true, guid };
+    }
+
+    // If we got here, verification might be pending
+    if (guid) {
+      await pool.query(
+        'UPDATE deployed_tokens SET verification_status = $1, verification_guid = $2 WHERE address = $3',
+        ['verifying', guid, tokenAddress.toLowerCase()]
+      );
+      return { success: true, guid };
+    }
+
+    throw new Error('Verification completed but status unclear');
+
+  } catch (error: any) {
+    console.error(`Verification error for ${tokenAddress}:`, error.message);
+    
+    // Update status to failed and save error
+    await pool.query(
+      `UPDATE deployed_tokens 
+       SET verification_status = $1, 
+           verification_error = $2,
+           verification_last_attempt = NOW()
+       WHERE address = $3`,
+      ['failed', error.message, tokenAddress.toLowerCase()]
+    );
+
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get all unverified tokens
+ */
+export async function getUnverifiedTokens(pool: Pool, network?: string) {
+  let query = `
+    SELECT * FROM deployed_tokens 
+    WHERE verification_status IN ('pending', 'failed')
+    AND is_active = true
+  `;
+  const values: any[] = [];
+
+  if (network) {
+    query += ' AND network = $1';
+    values.push(network);
+  }
+
+  query += ' ORDER BY created_at ASC';
+
+  const result = await pool.query(query, values);
+  return result.rows;
 }
 
