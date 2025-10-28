@@ -102,8 +102,12 @@ async function main() {
     "0X402",
     poolFee,
     usdc,
-    BigInt(5000000),
-    BigInt(1000000000),
+
+    // https://sepolia.basescan.org/tx/0x9728478344b3aca26069e8be173c1770e6bd079a1aeab7bb4045511ff48c404f
+    // somehow the second token will only send 0.000000000019999993
+    BigInt(0.1 * 10 ** 6), // 0.5 USDC (6 decimals)
+    BigInt(2000 * 10 ** 18), // 1000 tokens (18 decimals)
+
     1 // retries
   );
 
@@ -147,9 +151,10 @@ export async function deployLP(
   const amount1Desired = token0IsUSDC ? tokenAmountToDeployLP : usdcAmountToDeployLP;
 
   // Initial price (Q64.96) from integer ratio (token1/token0):
-  const sqrtPriceX96 = token0IsUSDC
-    ? encodeSqrtRatioX96(JSBI.BigInt(usdcAmountToDeployLP.toString()), JSBI.BigInt(tokenAmountToDeployLP.toString()))
-    : encodeSqrtRatioX96(JSBI.BigInt(tokenAmountToDeployLP.toString()), JSBI.BigInt(usdcAmountToDeployLP.toString()));
+  const sqrtPriceX96 = encodeSqrtRatioX96(
+    JSBI.BigInt(amount1Desired.toString()),
+    JSBI.BigInt(amount0Desired.toString())
+  );
 
   // Full-range ticks aligned to spacing
   const tickSpacing = spacingForFee(poolFee);
@@ -230,8 +235,8 @@ export async function deployLP(
   const SLIPPAGE_BPS = 100n; // = 1%
 
   // amountMin = computedMintAmount * (1 - slippage)
-  const amount0Min = (mintAmt0 * (10_000n - SLIPPAGE_BPS)) / 10_000n;
-  const amount1Min = (mintAmt1 * (10_000n - SLIPPAGE_BPS)) / 10_000n;
+  const amount0Min = 0n;
+  const amount1Min = 0n;
   let lastError: unknown = null;
   for (let i = 0; i <= Math.max(0, retryCount); i++) {
     try {
