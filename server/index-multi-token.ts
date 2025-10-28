@@ -28,9 +28,18 @@ const databaseUrl = process.env.DATABASE_URL;
 const useDatabase = !!databaseUrl;
 
 // Validation
-if (!serverPrivateKey) {
-  console.error("Missing required environment variables:");
-  console.error("- SERVER_PRIVATE_KEY");
+const missingVars: string[] = [];
+if (!serverPrivateKey) missingVars.push("SERVER_PRIVATE_KEY");
+if (!databaseUrl) missingVars.push("DATABASE_URL");
+
+if (missingVars.length > 0) {
+  console.error("\n❌ Missing required environment variables:");
+  missingVars.forEach(v => console.error(`   - ${v}`));
+  console.error("\n💡 To fix:");
+  console.error("   1. Create .env file: cp env.multi-token.example .env");
+  console.error("   2. Update DATABASE_URL with your PostgreSQL connection");
+  console.error("   3. Set SERVER_PRIVATE_KEY and LP_DEPLOYER_PRIVATE_KEY");
+  console.error("\n📖 See env.multi-token.example for full configuration\n");
   process.exit(1);
 }
 
@@ -38,12 +47,15 @@ if (!excessRecipient) {
   console.warn("⚠️  EXCESS_RECIPIENT_ADDRESS not set. Excess USDC will be sent to token deployer by default.");
 }
 
-// Setup database pool
+// Setup database pool with SSL support
 const pool = new Pool({
   connectionString: databaseUrl,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
+  ssl: databaseUrl?.includes('sslmode=require') ? {
+    rejectUnauthorized: false // For self-signed certificates
+  } : false,
 });
 
 // Viem setup
@@ -105,6 +117,9 @@ const queueProcessor = new MintQueueProcessor(
 // See: server/lp-deployer-standalone.ts
 // Run with: npm run lp-deployer
 
+// Deployment fee constants
+const DEPLOY_FEE_USDC = BigInt(1 * 10 ** 6); // 1 USDC
+
 /**
  * Generate a unique transaction hash for minting
  * Uses keccak256 to create a proper 32-byte hash
@@ -114,6 +129,23 @@ function generateMintTxHash(payer: string, timestamp: number, tokenAddress: stri
   const hash = keccak256(toHex(data));
   return hash as `0x${string}`;
 }
+
+/**
+ * GET /api/deploy-address - Get deployment service address
+ */
+app.get("/api/deploy-address", async (req, res) => {
+  try {
+    return res.status(200).json({
+      deployAddress: account.address,
+    });
+  } catch (error: any) {
+    console.error("❌ Error getting deploy address:", error.message);
+    return res.status(500).json({
+      error: "Failed to get deploy address",
+      message: error.message,
+    });
+  }
+});
 
 /**
  * POST /api/deploy - Deploy a new token
@@ -127,7 +159,7 @@ app.post("/api/deploy", async (req, res) => {
   }
 
   try {
-    const { name, symbol, mintAmount, maxMintCount, price, paymentToken, deployer } = req.body;
+    const { name, symbol, mintAmount, maxMintCount, price, paymentToken, deployer, authorization } = req.body;
 
     // Validation
     if (!name || !symbol || !mintAmount || !maxMintCount || !price || !paymentToken || !deployer) {
@@ -137,9 +169,18 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
 
+    // Validate authorization for deployment fee payment
+    if (!authorization || !authorization.signature) {
+      return res.status(400).json({
+        error: "Missing payment authorization",
+        message: "Deployment requires 1 USDC payment authorization",
+      });
+    }
+
     // Validate minimum constraints
     const mintAmountNum = parseFloat(mintAmount);
     const maxMintCountNum = parseInt(maxMintCount);
+    const priceNum = parseFloat(price);
 
     if (mintAmountNum < 1) {
       return res.status(400).json({
@@ -155,6 +196,13 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
 
+    if (priceNum < 1) {
+      return res.status(400).json({
+        error: "Invalid price",
+        message: "price must be at least 1",
+      });
+    }
+
     console.log(`\n🚀 Deploying new token: ${name} (${symbol})`);
     console.log(`   Deployer: ${deployer}`);
     console.log(`   Mint Amount: ${mintAmount} tokens`);
@@ -162,6 +210,84 @@ app.post("/api/deploy", async (req, res) => {
     console.log(`   Price: ${price} ${paymentToken}`);
     console.log(`   Excess Recipient: ${excessRecipient || deployer}`);
     console.log(`   💡 USDC should be sent to the token contract address (will be shown after deployment)`);
+
+    // Process deployment fee payment
+    console.log(`\n💰 Processing deployment fee (1 USDC)...`);
+    
+    const usdcAddress = network === 'base-sepolia' 
+      ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+      : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+
+    try {
+      // Verify authorization is to our address and for correct amount
+      if (getAddress(authorization.to) !== getAddress(account.address)) {
+        return res.status(400).json({
+          error: "Invalid payment recipient",
+          message: `Payment must be sent to ${account.address}`,
+        });
+      }
+
+      if (BigInt(authorization.value) !== DEPLOY_FEE_USDC) {
+        return res.status(400).json({
+          error: "Invalid payment amount",
+          message: `Payment must be exactly 1 USDC (${DEPLOY_FEE_USDC.toString()} wei)`,
+        });
+      }
+
+      // Execute transferWithAuthorization
+      const sig = authorization.signature.startsWith('0x') 
+        ? authorization.signature.slice(2) 
+        : authorization.signature;
+      
+      const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
+      const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
+      let v = parseInt(sig.slice(128, 130), 16);
+      
+      if (v === 0 || v === 1) v = v + 27;
+      
+      const gasPrice = await publicClient.getGasPrice();
+      const gasPriceWithBuffer = (gasPrice * 150n) / 100n;
+      
+      console.log(`   Executing transferWithAuthorization from ${authorization.from}...`);
+      
+      const paymentHash = await walletClient.writeContract({
+        address: usdcAddress,
+        abi: usdcAbi,
+        functionName: "transferWithAuthorization",
+        args: [
+          getAddress(authorization.from),
+          getAddress(authorization.to),
+          BigInt(authorization.value),
+          BigInt(authorization.validAfter),
+          BigInt(authorization.validBefore),
+          authorization.nonce as `0x${string}`,
+          v,
+          r,
+          s,
+        ],
+        gas: 200000n,
+        gasPrice: gasPriceWithBuffer,
+      });
+      
+      console.log(`   ✅ Payment transaction: ${paymentHash}`);
+      
+      const paymentReceipt = await publicClient.waitForTransactionReceipt({ 
+        hash: paymentHash,
+        confirmations: 1,
+      });
+      
+      if (paymentReceipt.status !== "success") {
+        throw new Error("Payment transaction reverted");
+      }
+      
+      console.log(`   ✅ Payment confirmed! Proceeding with deployment...`);
+    } catch (error: any) {
+      console.error("❌ Payment failed:", error.message);
+      return res.status(400).json({
+        error: "Payment failed",
+        message: error.message,
+      });
+    }
 
     const deployConfig: TokenDeployConfig = {
       name,
@@ -688,13 +814,27 @@ async function start() {
   await queueProcessor.start();
   console.log("✅ Queue processor started");
 
+  // Get actual queue config from database
+  let queueConfigDisplay = "enabled";
+  try {
+    const configResult = await pool.query(`
+      SELECT value FROM system_settings WHERE key = 'batch_interval_seconds'
+    `);
+    if (configResult.rows.length > 0) {
+      const interval = parseInt(configResult.rows[0].value);
+      queueConfigDisplay = `✅ Enabled (batch every ${interval}s)`;
+    }
+  } catch (e) {
+    queueConfigDisplay = "✅ Enabled";
+  }
+
   app.listen(PORT, () => {
     console.log(`\n🚀 Multi-Token x402 Server running on port ${PORT}`);
     console.log(`Network: ${network}`);
     console.log(`Excess Recipient: ${excessRecipient ? getAddress(excessRecipient) : 'Not configured (will use deployer)'}`);
     console.log(`Server Address: ${account.address}`);
     console.log(`Database: ✅ Enabled`);
-    console.log(`Queue System: ✅ Enabled (batch every 10s)`);
+    console.log(`Queue System: ${queueConfigDisplay}`);
     console.log(`\n💡 LP Deployment: Run standalone service with 'npm run lp-deployer'`);
     console.log(`\nEndpoints:`);
     console.log(`  POST /api/deploy - Deploy new token`);

@@ -15,7 +15,10 @@
     "build": "tsc",
     "address": "tsx getAddress.ts",
     "check": "tsx checkPendingTx.ts",
-    "check:role": "tsx checkRole.ts"
+    "check:role": "tsx checkRole.ts",
+    "db:init": "node init-db.js",
+    "db:migrate": "node init-db.js",
+    "queue:config": "node check-queue-config.js"
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.22.0",

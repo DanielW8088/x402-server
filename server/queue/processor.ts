@@ -48,12 +48,33 @@ export class MintQueueProcessor {
     // Load settings from database
     await this.loadSettings();
     
+    console.log(`   ⚙️  Loaded from DB: ${this.batchInterval}ms interval, max batch: ${this.maxBatchSize}`);
+    
     // Process immediately on start
     await this.processBatch();
     
-    // Then process on interval
-    this.processorInterval = setInterval(() => {
-      this.processBatch();
+    // Start recurring process
+    this.scheduleNextBatch();
+  }
+
+  /**
+   * Schedule next batch (allows dynamic interval changes)
+   */
+  private scheduleNextBatch() {
+    this.processorInterval = setTimeout(async () => {
+      // Reload settings before each batch
+      const oldInterval = this.batchInterval;
+      await this.loadSettings();
+      
+      if (oldInterval !== this.batchInterval) {
+        console.log(`   ⚙️  Interval updated: ${oldInterval}ms → ${this.batchInterval}ms`);
+      }
+      
+      // Process batch
+      await this.processBatch();
+      
+      // Schedule next batch
+      this.scheduleNextBatch();
     }, this.batchInterval);
   }
 

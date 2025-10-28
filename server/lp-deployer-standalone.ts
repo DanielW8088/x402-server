@@ -68,19 +68,31 @@ class StandaloneLPDeployer {
 
   constructor() {
     // Validate environment variables
-    if (!process.env.DATABASE_URL) {
-      throw new Error("❌ DATABASE_URL environment variable is required");
-    }
-    if (!process.env.PRIVATE_KEY) {
-      throw new Error("❌ PRIVATE_KEY environment variable is required (for calling transferAssetsForLP)");
-    }
-    if (!process.env.LP_DEPLOYER_PRIVATE_KEY) {
-      throw new Error("❌ LP_DEPLOYER_PRIVATE_KEY environment variable is required (for deploying LP)");
+    const missingVars: string[] = [];
+    if (!process.env.DATABASE_URL) missingVars.push("DATABASE_URL");
+    if (!process.env.PRIVATE_KEY) missingVars.push("PRIVATE_KEY");
+    if (!process.env.LP_DEPLOYER_PRIVATE_KEY) missingVars.push("LP_DEPLOYER_PRIVATE_KEY");
+
+    if (missingVars.length > 0) {
+      console.error("\n❌ Missing required environment variables:");
+      missingVars.forEach(v => console.error(`   - ${v}`));
+      console.error("\n💡 To fix:");
+      console.error("   1. Create .env file: cp env.multi-token.example .env");
+      console.error("   2. Set DATABASE_URL, PRIVATE_KEY, LP_DEPLOYER_PRIVATE_KEY");
+      console.error("\n📖 Example:");
+      console.error("   DATABASE_URL=postgresql://user:pass@localhost:5432/token_mint");
+      console.error("   PRIVATE_KEY=0x...");
+      console.error("   LP_DEPLOYER_PRIVATE_KEY=0x...\n");
+      throw new Error("Missing required environment variables");
     }
 
-    // Database
+    // Database with SSL support
+    const databaseUrl = process.env.DATABASE_URL;
     this.pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: databaseUrl,
+      ssl: databaseUrl?.includes('sslmode=require') ? {
+        rejectUnauthorized: false // For self-signed certificates
+      } : false,
     });
 
     // Network config
