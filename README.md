@@ -1,15 +1,33 @@
-# X402 Token Mint System - Uniswap V3
+# X402 Token Mint System
 
-> **完整的代币发行和流动性管理系统** - 基于Uniswap V3，支持EIP-3009无Gas Mint，自动LP部署
+> **完整的代币发行和流动性管理系统** - 支持Uniswap V3/V4，EIP-3009无Gas Mint，自动LP部署
+
+## 🆕 Uniswap V4 支持
+
+**现在支持 Uniswap V4！** 如果你在 V3 遇到问题，可以切换到 V4：
+
+```bash
+# 使用 V4 LP Deployer
+cd server
+npm run lp-deployer:v4
+
+# 查看 V4 文档
+cat UNISWAP_V4_MIGRATION.md
+```
+
+V4 优势：
+- ✅ **Hooks 系统** - 高度可定制的池子逻辑
+- ✅ **Gas 优化** - 单例 PoolManager 架构
+- ✅ **更灵活** - 支持自定义费用、动态费率等
 
 ## ✨ 核心特性
 
 - ✅ **Multi-Token支持** - 一个服务器管理多个token
 - ✅ **无Gas Minting** - EIP-3009 gasless transfers
-- ✅ **自动LP部署** - Mint完成后自动创建Uniswap V3流动性池
+- ✅ **自动LP部署** - Mint完成后自动创建Uniswap流动性池
+- ✅ **V3/V4 双支持** - 根据需求选择 Uniswap 版本
 - ✅ **队列系统** - 批量处理mint请求，降低Gas成本
 - ✅ **完整LP管理** - 收取费用、调整流动性、移除LP
-- ✅ **Uniswap V3** - 成熟稳定的V3生态，标准NFT position管理
 
 ## 🎯 工作流程
 
@@ -128,13 +146,20 @@ USDC: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 
 ## 📚 文档
 
-### 主要文档
-- **[README_V3.md](README_V3.md)** - 完整的V3系统文档
-- **[V3_MIGRATION_COMPLETE.md](V3_MIGRATION_COMPLETE.md)** - V3迁移完成总结
-- **[LP_MANAGEMENT_GUIDE.md](LP_MANAGEMENT_GUIDE.md)** - LP管理指南
+### 🔥 快速选择
+- **[V3_VS_V4_QUICK_GUIDE.md](V3_VS_V4_QUICK_GUIDE.md)** - ⚡ V3 vs V4 快速对比（先看这个！）
 
-### 参考文档
-- **[MIGRATION_TO_V3.md](MIGRATION_TO_V3.md)** - V3迁移参考
+### Uniswap V4
+- **[UNISWAP_V4_MIGRATION.md](UNISWAP_V4_MIGRATION.md)** - 🆕 V4 完整指南
+- **[server/lp-deployer-v4.ts](server/lp-deployer-v4.ts)** - V4 LP Deployer 源码
+
+### Uniswap V3
+- **[README_V3.md](README_V3.md)** - 完整的V3系统文档
+- **[server/lp-deployer-standalone.ts](server/lp-deployer-standalone.ts)** - V3 LP Deployer 源码
+
+### 通用文档
+- **[LP_DEPLOYER_STANDALONE.md](LP_DEPLOYER_STANDALONE.md)** - LP Deployer 架构说明
+- **[TRENDING_TOKENS_SORTING.md](TRENDING_TOKENS_SORTING.md)** - 排序算法
 - **[server/README.md](server/README.md)** - 服务器文档
 - **[contracts/README.md](contracts/README.md)** - 合约文档
 
