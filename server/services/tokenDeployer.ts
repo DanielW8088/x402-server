@@ -1,11 +1,16 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { writeFileSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { Pool } from 'pg';
 import { privateKeyToAccount } from 'viem/accounts';
 
 const execAsync = promisify(exec);
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 /**
  * Calculate square root of a BigInt using Newton's method

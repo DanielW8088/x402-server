@@ -112,6 +112,16 @@ DB_SSL_ENABLED=false
 DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ```
 
+### __dirname is not defined:
+This error occurs because the project uses ES modules (`"type": "module"` in package.json). The fix is already applied in the codebase using:
+```typescript
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+```
+
 ### ERR_MODULE_NOT_FOUND errors:
 If you see `Cannot find module` errors with ES modules, ensure all local imports in TypeScript files use `.js` extensions:
 ```typescript
