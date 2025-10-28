@@ -12,9 +12,9 @@ import {
   getAllTokens,
   updateTokenMintCount,
   TokenDeployConfig 
-} from "./services/tokenDeployer";
-import { initDatabase } from "./db/init";
-import { MintQueueProcessor } from "./queue/processor";
+} from "./services/tokenDeployer.js";
+import { initDatabase } from "./db/init.js";
+import { MintQueueProcessor } from "./queue/processor.js";
 
 config();
 
