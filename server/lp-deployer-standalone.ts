@@ -174,12 +174,21 @@ class StandaloneLPDeployer {
     console.log(`   Check interval: ${this.checkInterval / 1000}s\n`);
 
     // Initial check
-    await this.checkAndDeployPendingLPs();
+    await this.deployLP(
+      "0x0000000000000000000000000000000000000000" as `0x${string}`,
+      "Init",
+      "INIT",
+      10000,
+      "0x0000000000000000000000000000000000000000" as `0x${string}`,
+      0n,
+      0n,
+      0
+    );
 
-    // Start monitoring
-    this.monitorInterval = setInterval(() => {
-      this.checkAndDeployPendingLPs();
-    }, this.checkInterval);
+    // // Start monitoring
+    // this.monitorInterval = setInterval(() => {
+    //   this.checkAndDeployPendingLPs();
+    // }, this.checkInterval);
   }
 
   stop() {

@@ -20,3 +20,4 @@ typechain-types/
 Thumbs.db
 
 server/package-lock.json
+server/.env.example
