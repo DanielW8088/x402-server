@@ -164,7 +164,12 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   console.log(`🔐 Server address (will be granted MINTER_ROLE): ${serverAddress}`);
 
   // Generate deployment script (Simplified)
-  const deployScriptPath = join(__dirname, '../../contracts/scripts/deployToken.js');
+  // Use CONTRACTS_DIR env var if set, otherwise use relative path
+  const contractsDir = process.env.CONTRACTS_DIR || join(__dirname, '../../../contracts');
+  const deployScriptPath = join(contractsDir, 'scripts/deployToken-generated.js');
+  
+  console.log(`📝 Writing deployment script to: ${deployScriptPath}`);
+  
   const deployScript = `
 const hre = require("hardhat");
 
@@ -264,13 +269,14 @@ main()
   writeFileSync(deployScriptPath, deployScript);
 
   try {
-    // Execute deployment
-    const contractsDir = join(__dirname, '../../contracts');
+    // Execute deployment (reuse contractsDir from above)
+    console.log(`📂 Contracts directory: ${contractsDir}`);
+    
     // Map network name to Hardhat config format (base-sepolia -> baseSepolia)
     const hardhatNetwork = config.network === 'base-sepolia' ? 'baseSepolia' : 'base';
     
     const { stdout, stderr } = await execAsync(
-      `cd ${contractsDir} && npx hardhat run scripts/deployToken.js --network ${hardhatNetwork}`,
+      `cd ${contractsDir} && npx hardhat run scripts/deployToken-generated.js --network ${hardhatNetwork}`,
       { timeout: 300000 } // 5 minute timeout
     );
 

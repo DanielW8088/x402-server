@@ -2,8 +2,32 @@
 
 ## Prerequisites
 
+### Node.js Version
+Hardhat requires Node.js LTS version (18.x or 20.x). Check your version:
+```bash
+node --version
+```
+
+If you're using Node.js 21+ (unsupported), switch to LTS:
+```bash
+# Using nvm (recommended)
+nvm install 20
+nvm use 20
+
+# Or using n
+n lts
+```
+
+### PM2
 ```bash
 npm install -g pm2
+```
+
+**Important:** The server expects the `contracts` directory to be at the same level as the `server` directory:
+```
+project-root/
+├── server/
+└── contracts/
 ```
 
 ## Build
@@ -131,6 +155,28 @@ import { foo } from "./services/bar.js";
 // Wrong
 import { foo } from "./services/bar";
 ```
+
+### ENOENT: no such file or directory (contracts/scripts/deployToken-generated.js):
+This error means the `contracts` directory is not in the expected location. The server logs will show:
+- `📝 Writing deployment script to: [path]` - where it tries to write the script
+- `📂 Contracts directory: [path]` - where it tries to run hardhat
+
+**Solution 1 (Recommended):** Set `CONTRACTS_DIR` environment variable to the absolute path:
+```bash
+# In .env file or environment
+CONTRACTS_DIR=/home/user/x402-server/contracts
+```
+
+**Solution 2:** Ensure standard directory structure:
+```
+project-root/
+├── server/          (this directory)
+├── contracts/       (must be at same level as server/)
+│   └── scripts/
+└── client/
+```
+
+The server automatically generates `deployToken-generated.js` at runtime (this file is gitignored).
 
 ### Rebuild after code changes:
 ```bash
