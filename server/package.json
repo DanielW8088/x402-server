@@ -31,10 +31,12 @@
     "@coinbase/cdp-sdk": "^1.22.0",
     "@coinbase/x402": "latest",
     "@types/cors": "^2.8.19",
+    "@types/ioredis": "^4.28.10",
     "@types/pg": "^8.11.10",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "ioredis": "^5.8.2",
     "pg": "^8.13.1",
     "viem": "^2.21.54",
     "x402-express": "latest"

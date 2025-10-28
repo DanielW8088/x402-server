@@ -10,6 +10,7 @@ Backend server for automated token deployment and minting with Uniswap V3 liquid
 - 💧 Automatic Uniswap V3 LP deployment
 - ✅ **Contract verification on Basescan**
 - 📊 PostgreSQL database for tracking deployments
+- ⚡️ **Redis caching for trending tokens** (optional, improves frontend performance)
 - 🔐 Role-based access control
 
 ## Quick Start
@@ -34,7 +35,24 @@ npm run db:init
 npm run db:migrate-verification
 ```
 
-### 4. Start Server
+### 4. (Optional) Setup Redis Cache
+
+For better performance with trending tokens:
+
+```bash
+# Install Redis (macOS)
+brew install redis
+
+# Start Redis
+brew services start redis
+
+# Or run Redis in foreground
+redis-server
+```
+
+Redis is **optional** - the server will work without it, but trending tokens page will be slower.
+
+### 5. Start Server
 
 ```bash
 # Development
@@ -200,6 +218,11 @@ Key environment variables:
 # Database
 DATABASE_URL=postgresql://user:pass@host:5432/dbname
 
+# Redis Cache (optional)
+REDIS_URL=redis://localhost:6379
+TOKENS_CACHE_TTL=30  # Trending tokens cache (seconds)
+TOKEN_CACHE_TTL=10   # Individual token cache (seconds)
+
 # Private Keys
 SERVER_PRIVATE_KEY=0x...
 LP_DEPLOYER_PRIVATE_KEY=0x...
@@ -215,6 +238,11 @@ BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 # Contract Verification (in contracts/.env)
 BASESCAN_API_KEY=...
 ```
+
+**Redis Caching:** If `REDIS_URL` is set and Redis is available, the server will cache:
+- `/api/tokens` responses (trending tokens list, 30s TTL)
+- `/api/tokens/:address` responses (individual token info, 10s TTL)
+- Cache expires automatically via TTL (no manual invalidation to avoid cache thrashing)
 
 See [env.multi-token.example](./env.multi-token.example) for all options.
 

@@ -6,6 +6,7 @@ import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, for
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { Pool } from "pg";
+import Redis from "ioredis";
 import { 
   deployToken, 
   saveDeployedToken, 
@@ -87,6 +88,10 @@ const pool = new Pool({
   connectionTimeoutMillis: 2000,
   ssl: sslConfig,
 });
+
+// Redis setup (optional, graceful fallback) - will be initialized in start()
+const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+let redis: Redis | null = null;
 
 // Viem setup
 const chain = network === "base-sepolia" ? baseSepolia : base;
@@ -353,6 +358,8 @@ app.post("/api/deploy", async (req, res) => {
     const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
     console.log(`✅ Token saved to database`);
 
+    // Cache will auto-expire after TTL (no manual invalidation needed)
+
     // Calculate required vs total USDC
     const pricePerMintUSDC = BigInt(price) * BigInt(10 ** 6);
     const mintAmountWei = BigInt(mintAmount) * BigInt(10 ** 18);
@@ -390,7 +397,7 @@ app.post("/api/deploy", async (req, res) => {
 });
 
 /**
- * GET /api/tokens - Get all deployed tokens
+ * GET /api/tokens - Get all deployed tokens (with Redis cache)
  */
 app.get("/api/tokens", async (req, res) => {
   if (!pool) {
@@ -401,6 +408,24 @@ app.get("/api/tokens", async (req, res) => {
 
   try {
     const { deployer, limit = 50, offset = 0 } = req.query;
+    
+    // Cache key includes query params for proper cache isolation
+    const cacheKey = `tokens:${network}:${deployer || 'all'}:${limit}:${offset}`;
+    const cacheTTL = parseInt(process.env.TOKENS_CACHE_TTL || '30'); // 30 seconds default
+    
+    // Try cache first
+    if (redis) {
+      try {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+          console.log(`✅ Cache HIT: ${cacheKey}`);
+          return res.json(JSON.parse(cached));
+        }
+        console.log(`📭 Cache MISS: ${cacheKey}`);
+      } catch (cacheErr: any) {
+        console.warn(`⚠️  Redis read error: ${cacheErr.message}`);
+      }
+    }
 
     const tokens = await getAllTokens(pool, {
       network,
@@ -508,10 +533,22 @@ app.get("/api/tokens", async (req, res) => {
     // Sort by 24h USDC volume (descending)
     formattedTokens.sort((a, b) => b.volume24hUSDC - a.volume24hUSDC);
 
-    return res.json({
+    const response = {
       tokens: formattedTokens,
       total: formattedTokens.length,
-    });
+    };
+    
+    // Store in cache
+    if (redis) {
+      try {
+        await redis.setex(cacheKey, cacheTTL, JSON.stringify(response));
+        console.log(`💾 Cached: ${cacheKey} (TTL: ${cacheTTL}s)`);
+      } catch (cacheErr: any) {
+        console.warn(`⚠️  Redis write error: ${cacheErr.message}`);
+      }
+    }
+
+    return res.json(response);
   } catch (error: any) {
     console.error("❌ Error fetching tokens:", error.message);
     return res.status(500).json({
@@ -522,12 +559,29 @@ app.get("/api/tokens", async (req, res) => {
 });
 
 /**
- * GET /api/tokens/:address - Get specific token info
+ * GET /api/tokens/:address - Get specific token info (with Redis cache)
  */
 app.get("/api/tokens/:address", async (req, res) => {
   try {
     const { address } = req.params;
     const tokenContractAddress = address as `0x${string}`;
+    
+    // Cache key for individual token
+    const cacheKey = `token:${network}:${address.toLowerCase()}`;
+    const cacheTTL = parseInt(process.env.TOKEN_CACHE_TTL || '10'); // 10 seconds default
+    
+    // Try cache first
+    if (redis) {
+      try {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+          console.log(`✅ Cache HIT: ${cacheKey}`);
+          return res.json(JSON.parse(cached));
+        }
+      } catch (cacheErr: any) {
+        console.warn(`⚠️  Redis read error: ${cacheErr.message}`);
+      }
+    }
 
     // Fetch on-chain data
     const [mintAmount, maxSupply, totalSupply, remainingSupply, mintCount, maxMintCount, liquidityDeployed] = 
@@ -577,7 +631,7 @@ app.get("/api/tokens/:address", async (req, res) => {
       dbToken = await getToken(pool, address);
     }
 
-    return res.json({
+    const response = {
       address: address,
       name: dbToken?.name || "Unknown Token",
       symbol: dbToken?.symbol || "???",
@@ -595,7 +649,19 @@ app.get("/api/tokens/:address", async (req, res) => {
       deployer: dbToken?.deployer_address,
       paymentAddress: address, // USDC should be sent to token contract
       logoUrl: dbToken?.logo_url || null,
-    });
+    };
+    
+    // Store in cache
+    if (redis) {
+      try {
+        await redis.setex(cacheKey, cacheTTL, JSON.stringify(response));
+        console.log(`💾 Cached token: ${address} (TTL: ${cacheTTL}s)`);
+      } catch (cacheErr: any) {
+        console.warn(`⚠️  Redis write error: ${cacheErr.message}`);
+      }
+    }
+
+    return res.json(response);
   } catch (error: any) {
     console.error("❌ Error fetching token info:", error.message);
     return res.status(500).json({
@@ -857,6 +923,7 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     network,
     database: true,
+    redis: redis?.status === 'ready',
     queueProcessor: "enabled",
   });
 });
@@ -864,6 +931,23 @@ app.get("/health", (req, res) => {
 const PORT = process.env.PORT || 4021;
 
 async function start() {
+  // Initialize Redis
+  try {
+    redis = new Redis(redisUrl, {
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => {
+        if (times > 3) return null;
+        return Math.min(times * 200, 1000);
+      },
+      lazyConnect: true,
+    });
+    await redis.connect();
+    console.log(`✅ Redis connected: ${redisUrl}`);
+  } catch (err: any) {
+    console.warn(`⚠️  Redis not available (${err.message}), caching disabled`);
+    redis = null;
+  }
+
   // Initialize database
   try {
     await initDatabase(pool);
@@ -897,12 +981,13 @@ async function start() {
     console.log(`Excess Recipient: ${excessRecipient ? getAddress(excessRecipient) : 'Not configured (will use deployer)'}`);
     console.log(`Server Address: ${account.address}`);
     console.log(`Database: ✅ Enabled`);
+    console.log(`Redis Cache: ${redis ? '✅ Enabled' : '❌ Disabled'}`);
     console.log(`Queue System: ${queueConfigDisplay}`);
     console.log(`\n💡 LP Deployment: Run standalone service with 'npm run lp-deployer'`);
     console.log(`\nEndpoints:`);
     console.log(`  POST /api/deploy - Deploy new token`);
-    console.log(`  GET /api/tokens - List all tokens`);
-    console.log(`  GET /api/tokens/:address - Get token info`);
+    console.log(`  GET /api/tokens - List all tokens (cached)`);
+    console.log(`  GET /api/tokens/:address - Get token info (cached)`);
     console.log(`  POST /api/mint/:address - Mint tokens (queued)`);
     console.log(`  GET /api/queue/:queueId - Check queue status`);
     console.log(`  GET /api/queue/stats - Queue statistics`);
@@ -916,6 +1001,7 @@ start().catch(console.error);
 process.on('SIGTERM', async () => {
   console.log('\n📛 SIGTERM received, shutting down gracefully...');
   queueProcessor.stop();
+  if (redis) await redis.quit();
   await pool.end();
   process.exit(0);
 });
@@ -923,6 +1009,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('\n📛 SIGINT received, shutting down gracefully...');
   queueProcessor.stop();
+  if (redis) await redis.quit();
   await pool.end();
   process.exit(0);
 });

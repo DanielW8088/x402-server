@@ -400,6 +400,8 @@ export class MintQueueProcessor {
 
         await client.query("COMMIT");
         console.log(`✅ Batch processing complete: ${items.length} mint(s) successful\n`);
+        
+        // Cache will auto-expire after TTL (no manual invalidation needed for high-frequency mints)
       } catch (error: any) {
         await client.query("ROLLBACK");
         throw error;
