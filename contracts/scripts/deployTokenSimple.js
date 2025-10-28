@@ -1,7 +1,7 @@
 const hre = require("hardhat");
 
 /**
- * Deploy PAYX_Simple token (Simplified LP deployment)
+ * Deploy X402Token token (Simplified LP deployment)
  * 
  * Environment variables:
  * - TOKEN_NAME: Token name
@@ -34,7 +34,7 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`\n🚀 Deploying PAYX_Simple Token (Simplified LP Deployment)`);
+    console.log(`\n🚀 Deploying X402Token Token (Simplified LP Deployment)`);
     console.log(`   Deployer: ${deployer.address}`);
     console.log(`   Name: ${TOKEN_NAME}`);
     console.log(`   Symbol: ${TOKEN_SYMBOL}`);
@@ -74,8 +74,8 @@ async function main() {
 
     // Deploy contract
     console.log(`🔨 Deploying contract...`);
-    const PAYX = await hre.ethers.getContractFactory("PAYX_Simple");
-    const token = await PAYX.deploy(
+    const X402Token = await hre.ethers.getContractFactory("X402Token");
+    const token = await X402Token.deploy(
         TOKEN_NAME,
         TOKEN_SYMBOL,
         mintAmountWei,

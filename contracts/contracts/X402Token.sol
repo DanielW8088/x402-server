@@ -8,18 +8,22 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
- * @title PAYX - X402 Token with Gasless Minting (Simplified)
- * @notice ERC20 token with EIP-3009 (gasless transfers), access control
+ * @title X402Token - 0x402 Token with Gasless Minting
+ * @notice ERC20 token with EIP-3009 (gasless transfers), access control, and automated liquidity
  * 
  * Features:
  * - Gasless minting via EIP-3009 transferWithAuthorization
  * - 80/20 tokenomics: 80% user mints, 20% LP reserve
  * - After all mints complete, tokens and USDC are transferred to LP deployer address
  * - LP deployment handled by backend service
+ * - Automated role management for secure operations
  */
-contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
+contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
+    using SafeERC20 for IERC20;
+    
     // ==================== Errors ====================
     
     error ArrayLengthMismatch();
@@ -31,11 +35,16 @@ contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     error AuthorizationNotYetValid(uint256 nowTime, uint256 validAfter);
     error InvalidSigner(address signer, address expected);
     error InvalidRecipient(address to);
+    error InvalidAddress();
+    error InvalidAmount();
+    error EmergencyModeActive();
 
     // ==================== Events ====================
     
     event TokensMinted(address indexed to, uint256 amount, bytes32 txHash);
     event AssetsTransferredForLP(address indexed lpDeployer, uint256 tokenAmount, uint256 usdcAmount);
+    event EmergencyWithdraw(address indexed recipient, uint256 amount);
+    event TokenWithdraw(address indexed token, address indexed recipient, uint256 amount);
 
     // --- EIP-3009 events ---
     event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
@@ -100,7 +109,34 @@ contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         address _excessRecipient,
         address _lpDeployer
     ) ERC20(name, symbol) EIP712(name, "1") Ownable(msg.sender) {
-        require(_lpDeployer != address(0), "Invalid LP deployer address");
+        // Validate addresses
+        if (_paymentToken == address(0)) revert InvalidAddress();
+        if (_excessRecipient == address(0)) revert InvalidAddress();
+        if (_lpDeployer == address(0)) revert InvalidAddress();
+        
+        // Validate amounts
+        if (_mintAmount == 0) revert InvalidAmount();
+        if (_maxMintCount == 0) revert InvalidAmount();
+        if (_pricePerMint == 0) revert InvalidAmount();
+        if (_poolSeedAmount == 0) revert InvalidAmount();
+        
+        // Validate supply constraints
+        // Ensure pool seed doesn't exceed max supply
+        if (_poolSeedAmount > MAX_SUPPLY) revert MaxSupplyExceeded();
+        
+        // Ensure total supply (pool + user mints) doesn't exceed max supply
+        // Note: Using unchecked math here is safe because we check overflow explicitly
+        unchecked {
+            uint256 totalUserMintable = _mintAmount * _maxMintCount;
+            // Check for overflow in multiplication
+            if (_maxMintCount > 0 && totalUserMintable / _maxMintCount != _mintAmount) {
+                revert MaxSupplyExceeded();
+            }
+            // Check total supply constraint
+            if (_poolSeedAmount + totalUserMintable > MAX_SUPPLY) {
+                revert MaxSupplyExceeded();
+            }
+        }
         
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(MINTER_ROLE, msg.sender);
@@ -275,32 +311,37 @@ contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
     /// @notice Transfer tokens and USDC to LP deployer after all mints complete
     /// @dev Can only be called once, when maxMintCount is reached
+    /// @dev Cannot be called if emergency withdraw has been used
     function transferAssetsForLP() external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_mintCount >= MAX_MINT_COUNT, "Max mint count not reached yet");
         require(!_assetsTransferred, "Assets already transferred");
+        if (_emergencyWithdrawUsed) revert EmergencyModeActive();
 
         _assetsTransferred = true;
 
         // Calculate USDC needed for LP
+        // Note: This calculation may have rounding (truncation toward zero)
+        // Pool economics should account for this potential 1-wei difference
         uint256 amountPayment = (POOL_SEED_AMOUNT * PRICE_PER_MINT) / MINT_AMOUNT;
         
-        // Transfer excess USDC to recipient
+        // Transfer excess USDC to recipient using SafeERC20
         uint256 totalBalance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
         if (totalBalance > amountPayment) {
             uint256 excess = totalBalance - amountPayment;
-            IERC20(PAYMENT_TOKEN).transfer(EXCESS_RECIPIENT, excess);
+            IERC20(PAYMENT_TOKEN).safeTransfer(EXCESS_RECIPIENT, excess);
         }
 
         // Transfer tokens to LP deployer
         _transfer(address(this), LP_DEPLOYER, POOL_SEED_AMOUNT);
         
-        // Transfer USDC to LP deployer
-        IERC20(PAYMENT_TOKEN).transfer(LP_DEPLOYER, amountPayment);
+        // Transfer USDC to LP deployer using SafeERC20
+        IERC20(PAYMENT_TOKEN).safeTransfer(LP_DEPLOYER, amountPayment);
 
         emit AssetsTransferredForLP(LP_DEPLOYER, POOL_SEED_AMOUNT, amountPayment);
     }
 
     /// @notice Emergency withdraw before assets are transferred
+    /// @dev Once used, LP asset transfer will be permanently blocked
     function emergencyWithdraw() external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(!_assetsTransferred, "Assets already transferred");
         require(!_emergencyWithdrawUsed, "Emergency withdraw already used");
@@ -308,7 +349,8 @@ contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         
         uint256 balance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
         if (balance > 0) {
-            IERC20(PAYMENT_TOKEN).transfer(msg.sender, balance);
+            IERC20(PAYMENT_TOKEN).safeTransfer(msg.sender, balance);
+            emit EmergencyWithdraw(msg.sender, balance);
         }
     }
 
@@ -317,15 +359,16 @@ contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     /// @param amount Amount to withdraw (0 = withdraw all)
     /// @param recipient Address to receive tokens (address(0) = msg.sender)
     function withdrawERC20(address token, uint256 amount, address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(token != address(0), "Invalid token address");
+        if (token == address(0)) revert InvalidAddress();
         address to = recipient == address(0) ? msg.sender : recipient;
         uint256 balance = IERC20(token).balanceOf(address(this));
         uint256 withdrawAmount = amount == 0 ? balance : amount;
         
-        require(withdrawAmount > 0, "Nothing to withdraw");
+        if (withdrawAmount == 0) revert InvalidAmount();
         require(balance >= withdrawAmount, "Insufficient balance");
         
-        IERC20(token).transfer(to, withdrawAmount);
+        IERC20(token).safeTransfer(to, withdrawAmount);
+        emit TokenWithdraw(token, to, withdrawAmount);
     }
 
     /// @notice Withdraw USDC (convenience function)
@@ -334,10 +377,11 @@ contract PAYX_Simple is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         uint256 balance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
         uint256 withdrawAmount = amount == 0 ? balance : amount;
         
-        require(withdrawAmount > 0, "Nothing to withdraw");
+        if (withdrawAmount == 0) revert InvalidAmount();
         require(balance >= withdrawAmount, "Insufficient balance");
         
-        IERC20(PAYMENT_TOKEN).transfer(to, withdrawAmount);
+        IERC20(PAYMENT_TOKEN).safeTransfer(to, withdrawAmount);
+        emit TokenWithdraw(PAYMENT_TOKEN, to, withdrawAmount);
     }
 
     /// @notice Check ERC20 token balance in contract

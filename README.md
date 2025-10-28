@@ -52,8 +52,10 @@ cd ../contracts && npm install
 
 # 配置环境变量
 cp server/.env.example server/.env
-# 填写: DATABASE_URL, SERVER_PRIVATE_KEY, EXCESS_RECIPIENT_ADDRESS
+# 填写: DATABASE_URL, SERVER_PRIVATE_KEY, LP_DEPLOYER_PRIVATE_KEY, EXCESS_RECIPIENT_ADDRESS
 ```
+
+**重要**: SERVER_PRIVATE_KEY 会在部署新 token 时自动被授予 MINTER_ROLE，无需手动授权。详见 [server/AUTO_GRANT_MINTER_ROLE.md](server/AUTO_GRANT_MINTER_ROLE.md)
 
 ### 2. 启动服务器
 
@@ -84,6 +86,11 @@ curl -X POST http://localhost:3002/api/deploy \
   }'
 ```
 
+**自动完成的操作**:
+- ✅ 部署 ERC20 代币合约
+- ✅ 自动授予 SERVER_PRIVATE_KEY 的 MINTER_ROLE
+- ✅ 保存到数据库
+
 ### 4. Mint代币
 
 ```bash
@@ -109,7 +116,7 @@ curl http://localhost:3002/api/tokens/TOKEN_ADDRESS
 ```
 token-mint/
 ├── contracts/
-│   ├── contracts/PAYX.sol          # 主合约（Uniswap V3）
+│   ├── contracts/X402Token.sol     # 主合约
 │   └── scripts/deployTokenV3.js    # 部署脚本
 │
 ├── server/

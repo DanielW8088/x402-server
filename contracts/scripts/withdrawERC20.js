@@ -42,7 +42,7 @@ async function main() {
     console.log(`   Network: ${hre.network.name}\n`);
 
     // Get token contract
-    const token = await hre.ethers.getContractAt("PAYX", TOKEN_ADDRESS);
+    const token = await hre.ethers.getContractAt("X402Token", TOKEN_ADDRESS);
 
     // Determine which ERC20 to withdraw
     let erc20Address;
