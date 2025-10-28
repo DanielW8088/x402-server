@@ -2,6 +2,11 @@
 
 Full-featured ERC20 token with x402 payment integration, EIP-3009 support, and automated liquidity deployment.
 
+
+```bash
+npx hardhat compile
+```
+
 ## 📚 Documentation
 
 | Document | Description |

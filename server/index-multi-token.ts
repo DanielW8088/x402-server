@@ -646,6 +646,17 @@ app.post("/api/mint/:address", async (req, res) => {
           : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
       }
       
+      // Verify authorization is to the correct token contract address
+      if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
+        console.error(`❌ Invalid payment recipient: expected ${tokenAddress}, got ${authorization.to}`);
+        return res.status(400).json({
+          error: "Invalid payment recipient",
+          message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
+        });
+      }
+      
+      console.log(`✅ Payment recipient verified: ${tokenAddress}`);
+      
       // Execute transferWithAuthorization
       try {
         const sig = authorization.signature.startsWith('0x') 

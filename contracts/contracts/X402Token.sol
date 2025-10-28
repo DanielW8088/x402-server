@@ -416,7 +416,14 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         return MINT_AMOUNT;
     }
 
-    function maxSupply() external pure returns (uint256) {
+    function maxSupply() external view returns (uint256) {
+        // Return actual total supply: user mintable + LP pool
+        // This is the real total supply that will exist after all mints and LP deployment
+        return (MINT_AMOUNT * MAX_MINT_COUNT) + POOL_SEED_AMOUNT;
+    }
+
+    function hardCapSupply() external pure returns (uint256) {
+        // Return the hard-coded maximum supply limit (for reference)
         return MAX_SUPPLY;
     }
 
