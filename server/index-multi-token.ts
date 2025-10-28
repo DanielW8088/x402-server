@@ -53,8 +53,8 @@ const pool = new Pool({
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
-  ssl: databaseUrl?.includes('sslmode=require') ? {
-    rejectUnauthorized: false // For self-signed certificates
+  ssl: process.env.NODE_ENV === 'production' ? {
+    rejectUnauthorized: false // For self-signed or cloud-managed certificates
   } : false,
 });
 

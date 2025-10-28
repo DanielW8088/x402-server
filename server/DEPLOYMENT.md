@@ -83,6 +83,16 @@ npx tsx index-multi-token.ts
 
 ## Troubleshooting
 
+### SSL certificate verification errors:
+If you see `unable to verify the first certificate` errors, ensure `NODE_ENV=production` is set in your environment. The server automatically enables SSL with `rejectUnauthorized: false` for production databases.
+
+In ecosystem.config.js:
+```javascript
+env: {
+  NODE_ENV: 'production'
+}
+```
+
 ### ERR_MODULE_NOT_FOUND errors:
 If you see `Cannot find module` errors with ES modules, ensure all local imports in TypeScript files use `.js` extensions:
 ```typescript
