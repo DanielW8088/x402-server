@@ -83,9 +83,10 @@ if (!dbSslEnabled && isRemoteDB) {
 
 const pool = new Pool({
   connectionString: databaseUrl,
-  max: 20,
+  max: 50, // Increased from 20 for better concurrency
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 5000, // Increased from 2000
+  statement_timeout: 30000, // SQL query timeout
   ssl: sslConfig,
 });
 
@@ -435,100 +436,75 @@ app.get("/api/tokens", async (req, res) => {
       offset: parseInt(offset as string),
     });
 
-    // Calculate 24h USDC volume for each token
-    const volumeQuery = await pool.query(`
-      SELECT 
-        token_address,
-        COUNT(*) as mint_count_24h
-      FROM mint_history
-      WHERE completed_at > NOW() - INTERVAL '24 hours'
-      GROUP BY token_address
-    `);
+    if (tokens.length === 0) {
+      return res.json({ tokens: [], total: 0 });
+    }
 
-    const volumeMap = new Map<string, number>();
-    volumeQuery.rows.forEach(row => {
-      if (row.token_address) {
-        volumeMap.set(row.token_address.toLowerCase(), parseInt(row.mint_count_24h));
+    // ⚡️ OPTIMIZATION: Use multicall to batch read all chain data in 1 RPC call
+    const contracts = tokens.flatMap(token => [
+      {
+        address: token.address as `0x${string}`,
+        abi: tokenAbi,
+        functionName: "mintCount" as const,
+      },
+      {
+        address: token.address as `0x${string}`,
+        abi: tokenAbi,
+        functionName: "liquidityDeployed" as const,
       }
-    });
+    ]);
 
-    // Fetch live on-chain data for each token
-    const formattedTokens = await Promise.all(tokens.map(async (token) => {
-      try {
-        // Get live mintCount from chain
-        const mintCount = await publicClient.readContract({
-          address: token.address as `0x${string}`,
-          abi: tokenAbi,
-          functionName: "mintCount",
-        });
+    let chainResults: any[] = [];
+    try {
+      // Batch read all chain data (200 calls → 1 call!)
+      chainResults = await publicClient.multicall({ contracts, allowFailure: true });
+    } catch (err: any) {
+      console.error(`⚠️  Multicall failed, using DB fallback: ${err.message}`);
+    }
 
-        // Try to get liquidityDeployed, fall back to DB if not available (old contracts)
-        let liquidityDeployed: boolean;
-        try {
-          liquidityDeployed = await publicClient.readContract({
-            address: token.address as `0x${string}`,
-            abi: tokenAbi,
-            functionName: "liquidityDeployed",
-          }) as boolean;
-        } catch (lpErr) {
-          // Old contract without liquidityDeployed function, use DB value
-          liquidityDeployed = token.liquidity_deployed;
-        }
+    // Format tokens with chain data
+    const formattedTokens = tokens.map((token, i) => {
+      let mintCount = token.mint_count; // DB fallback
+      let liquidityDeployed = token.liquidity_deployed; // DB fallback
 
-        // Calculate 24h USDC volume
-        const mintCount24h = token.address ? (volumeMap.get(token.address.toLowerCase()) || 0) : 0;
-        // Extract price number from "1 USDC" format
-        const priceMatch = token.price ? token.price.match(/[\d.]+/) : null;
-        const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 0;
-        const volume24hUSDC = mintCount24h * pricePerMint;
-
-        return {
-          address: token.address,
-          name: token.name,
-          symbol: token.symbol,
-          deployer: token.deployer_address,
-          mintAmount: token.mint_amount,
-          maxMintCount: token.max_mint_count,
-          mintCount: Number(mintCount), // Live data from chain
-          mintCount24h, // Mints in last 24h
-          volume24hUSDC, // USDC volume in last 24h
-          price: token.price,
-          paymentToken: token.payment_token_symbol,
-          network: token.network,
-          liquidityDeployed: liquidityDeployed, // Live or DB data
-          createdAt: token.created_at,
-          mintUrl: `/mint/${token.address}`,
-          logoUrl: token.logo_url || null,
-        };
-      } catch (err) {
-        // Fallback to database data if chain read fails
-        console.error(`⚠️  Using DB data for ${token.address} (chain read failed)`);
+      // Extract multicall results (2 calls per token)
+      if (chainResults.length > i * 2) {
+        const mintCountResult = chainResults[i * 2];
+        const lpResult = chainResults[i * 2 + 1];
         
-        const mintCount24h = token.address ? (volumeMap.get(token.address.toLowerCase()) || 0) : 0;
-        const priceMatch = token.price ? token.price.match(/[\d.]+/) : null;
-        const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 0;
-        const volume24hUSDC = mintCount24h * pricePerMint;
-
-        return {
-          address: token.address,
-          name: token.name,
-          symbol: token.symbol,
-          deployer: token.deployer_address,
-          mintAmount: token.mint_amount,
-          maxMintCount: token.max_mint_count,
-          mintCount: token.mint_count, // Fallback to DB data
-          mintCount24h,
-          volume24hUSDC,
-          price: token.price,
-          paymentToken: token.payment_token_symbol,
-          network: token.network,
-          liquidityDeployed: token.liquidity_deployed, // Fallback to DB data
-          createdAt: token.created_at,
-          mintUrl: `/mint/${token.address}`,
-          logoUrl: token.logo_url || null,
-        };
+        if (mintCountResult.status === 'success' && mintCountResult.result !== undefined) {
+          mintCount = Number(mintCountResult.result);
+        }
+        if (lpResult.status === 'success' && lpResult.result !== undefined) {
+          liquidityDeployed = lpResult.result as boolean;
+        }
       }
-    }));
+
+      // Calculate 24h USDC volume (now from optimized DB query)
+      const mintCount24h = parseInt(token.mint_count_24h || '0');
+      const priceMatch = token.price ? token.price.match(/[\d.]+/) : null;
+      const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 0;
+      const volume24hUSDC = mintCount24h * pricePerMint;
+
+      return {
+        address: token.address,
+        name: token.name,
+        symbol: token.symbol,
+        deployer: token.deployer_address,
+        mintAmount: token.mint_amount,
+        maxMintCount: token.max_mint_count,
+        mintCount, // From chain or DB
+        mintCount24h,
+        volume24hUSDC,
+        price: token.price,
+        paymentToken: token.payment_token_symbol,
+        network: token.network,
+        liquidityDeployed,
+        createdAt: token.created_at,
+        mintUrl: `/mint/${token.address}`,
+        logoUrl: token.logo_url || null,
+      };
+    });
 
     // Sort by 24h USDC volume (descending)
     formattedTokens.sort((a, b) => b.volume24hUSDC - a.volume24hUSDC);

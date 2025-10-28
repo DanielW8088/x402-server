@@ -401,7 +401,7 @@ export async function getToken(pool: Pool, address: string) {
 }
 
 /**
- * Get all tokens from database
+ * Get all tokens from database with 24h mint stats
  */
 export async function getAllTokens(pool: Pool, options: {
   network?: string;
@@ -410,26 +410,34 @@ export async function getAllTokens(pool: Pool, options: {
   limit?: number;
   offset?: number;
 } = {}) {
-  let query = 'SELECT * FROM deployed_tokens WHERE 1=1';
+  // Optimized: Join mint_history to get 24h stats in single query
+  let query = `
+    SELECT 
+      t.*,
+      COUNT(m.id) FILTER (WHERE m.completed_at > NOW() - INTERVAL '24 hours') as mint_count_24h
+    FROM deployed_tokens t
+    LEFT JOIN mint_history m ON m.token_address = t.address
+    WHERE 1=1
+  `;
   const values: any[] = [];
   let paramIndex = 1;
 
   if (options.network) {
-    query += ` AND network = $${paramIndex++}`;
+    query += ` AND t.network = $${paramIndex++}`;
     values.push(options.network);
   }
 
   if (options.deployer) {
-    query += ` AND deployer_address = $${paramIndex++}`;
+    query += ` AND t.deployer_address = $${paramIndex++}`;
     values.push(options.deployer.toLowerCase());
   }
 
   if (options.isActive !== undefined) {
-    query += ` AND is_active = $${paramIndex++}`;
+    query += ` AND t.is_active = $${paramIndex++}`;
     values.push(options.isActive);
   }
 
-  query += ' ORDER BY created_at DESC';
+  query += ' GROUP BY t.id ORDER BY t.created_at DESC';
 
   if (options.limit) {
     query += ` LIMIT $${paramIndex++}`;
