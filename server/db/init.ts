@@ -23,7 +23,7 @@ export async function initDatabase(pool: Pool) {
       return;
     }
     
-    const schemaSQL = readFileSync(join(__dirname, "schema.sql"), "utf8");
+    const schemaSQL = readFileSync(join(__dirname, "schema-v3.sql"), "utf8");
     await pool.query(schemaSQL);
     
     console.log("✅ Database schema initialized successfully");

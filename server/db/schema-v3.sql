@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS deployed_tokens (
     liquidity_deployed_at TIMESTAMP,
     lp_token_id VARCHAR(78), -- V3 NFT position token ID
     lp_deployment_error TEXT,
-    lp_deployment_error_at TIMESTAMP
+    lp_deployment_error_at TIMESTAMP,
+    lp_retry_count INTEGER DEFAULT 0 -- Number of LP deployment retry attempts
 );
 
 -- Indexes for performance
@@ -156,4 +157,5 @@ COMMENT ON TABLE deployed_tokens IS 'Deployed tokens using Uniswap V3';
 COMMENT ON COLUMN deployed_tokens.position_manager IS 'Uniswap V3 NonfungiblePositionManager address';
 COMMENT ON COLUMN deployed_tokens.pool_fee IS 'Uniswap V3 pool fee tier (3000 = 0.3%, 500 = 0.05%, 10000 = 1%)';
 COMMENT ON COLUMN deployed_tokens.lp_token_id IS 'Uniswap V3 NFT position token ID';
+COMMENT ON COLUMN deployed_tokens.lp_retry_count IS 'Number of times LP deployment has been retried';
 
