@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
+import { readFileSync } from "fs";
 import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, getAddress, keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
@@ -48,14 +49,43 @@ if (!excessRecipient) {
 }
 
 // Setup database pool with SSL support
+const dbSslEnabled = process.env.DB_SSL_ENABLED !== 'false'; // Default to true, set to 'false' to disable
+const isRemoteDB = databaseUrl && !databaseUrl.includes('localhost') && !databaseUrl.includes('127.0.0.1');
+
+// SSL certificate configuration
+const sslConfig = (dbSslEnabled && isRemoteDB) ? (() => {
+  const sslCA = process.env.DB_SSL_CA;
+  const sslCert = process.env.DB_SSL_CERT;
+  const sslKey = process.env.DB_SSL_KEY;
+  
+  // If certificate files are specified, use them
+  if (sslCA || sslCert || sslKey) {
+    console.log("🔐 Using SSL certificates for database connection");
+    return {
+      rejectUnauthorized: true,
+      ca: sslCA ? readFileSync(sslCA).toString() : undefined,
+      cert: sslCert ? readFileSync(sslCert).toString() : undefined,
+      key: sslKey ? readFileSync(sslKey).toString() : undefined,
+    };
+  }
+  
+  // Otherwise use default SSL with relaxed verification
+  console.log("🔓 Using SSL with relaxed verification for database connection");
+  return {
+    rejectUnauthorized: false
+  };
+})() : false;
+
+if (!dbSslEnabled && isRemoteDB) {
+  console.warn("⚠️  SSL disabled for remote database connection (DB_SSL_ENABLED=false)");
+}
+
 const pool = new Pool({
   connectionString: databaseUrl,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
-  ssl: process.env.NODE_ENV === 'production' ? {
-    rejectUnauthorized: false // For self-signed or cloud-managed certificates
-  } : false,
+  ssl: sslConfig,
 });
 
 // Viem setup

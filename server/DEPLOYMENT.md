@@ -26,6 +26,7 @@ cp env.multi-token.example .env
    - Private keys
    - RPC endpoints
    - Contract addresses
+   - SSL certificates (if required)
 
 ## Run with PM2 (Production)
 
@@ -84,13 +85,31 @@ npx tsx index-multi-token.ts
 ## Troubleshooting
 
 ### SSL certificate verification errors:
-If you see `unable to verify the first certificate` errors, ensure `NODE_ENV=production` is set in your environment. The server automatically enables SSL with `rejectUnauthorized: false` for production databases.
 
-In ecosystem.config.js:
-```javascript
-env: {
-  NODE_ENV: 'production'
-}
+**Option 1: Certificate authentication (recommended for production)**
+
+For databases requiring certificate authentication (e.g., Google Cloud SQL):
+
+1. Download SSL certificates from your database provider
+2. Place them in a secure location (e.g., `server/certs/`)
+3. Add to `.env`:
+```bash
+DB_SSL_CA=/path/to/server-ca.pem
+DB_SSL_CERT=/path/to/client-cert.pem
+DB_SSL_KEY=/path/to/client-key.pem
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+```
+
+**Option 2: Relaxed SSL (for development)**
+
+If certificates aren't available, the server automatically uses `rejectUnauthorized: false` for remote databases (not localhost). Just ensure `DATABASE_URL` points to your remote database.
+
+**Option 3: Disable SSL completely**
+
+To completely disable SSL (not recommended for production):
+```bash
+DB_SSL_ENABLED=false
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ```
 
 ### ERR_MODULE_NOT_FOUND errors:
