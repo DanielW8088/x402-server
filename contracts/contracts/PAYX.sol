@@ -12,6 +12,7 @@ import {IPositionManager, PoolKey as PositionPoolKey} from "v4-periphery/src/int
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {maxUsableTick, minUsableTick} from 
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {LiquidityAmounts} from "v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {Actions} from "v4-periphery/src/libraries/Actions.sol";
@@ -40,6 +41,9 @@ contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     error MaxMintCountExceeded();
     /// @notice The error thrown when minting would exceed the maximum supply
     error MaxSupplyExceeded();
+
+    /// @notice The error thrown when there is no liquidity
+    error NoLiquidity();
 
     // --- EIP-3009 specific errors ---
     error AuthorizationStateInvalid(address authorizer, bytes32 nonce);
@@ -288,7 +292,11 @@ contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
         // Auto-deploy liquidity when max mint count is reached
         if (_mintCount == MAX_MINT_COUNT) {
-            _initializePoolAndDeployLiquidity(10_000, 200);
+            // Adjust fee and tickSpacing as needed
+            uint24 fee = 10_000;
+            int24 tickSpacing = 200;
+            
+            _initializePoolAndDeployLiquidity(fee, tickSpacing);
         }
     }
 
@@ -446,28 +454,23 @@ contract PAYX is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         amount0Max = SafeCast.toUint128(amount0);
         amount1Max = SafeCast.toUint128(amount1);
 
-        uint256 sqrtPriceX96 = PAYMENT_TOKEN_IS_TOKEN0 ? SQRT_PRICE_PAYMENT_TOKEN_FIRST : SQRT_PRICE_TOKEN_FIRST;
-        (int24 tickLower, int24 tickUpper) = _fullRangeTicks(poolKey.tickSpacing);
+        // uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(0);
+        uint160 sqrtPriceX96 = PAYMENT_TOKEN_IS_TOKEN0 ? SQRT_PRICE_PAYMENT_TOKEN_FIRST : SQRT_PRICE_TOKEN_FIRST;        
+    
+        tickLower = TickMath.minUsableTick(tickSpacing);
+        tickUpper = TickMath.maxUsableTick(tickSpacing);
 
         liquidity = LiquidityAmounts.getLiquidityForAmounts(
-            SafeCast.toUint160(sqrtPriceX96),
+            sqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickLower),
             TickMath.getSqrtPriceAtTick(tickUpper),
             amount0,
             amount1
         );
-    }
 
-    function _fullRangeTicks(int24 tickSpacing) internal pure returns (int24 tickLower, int24 tickUpper) {
-        tickLower = (TickMath.MIN_TICK / tickSpacing) * tickSpacing;
-        if (tickLower < TickMath.MIN_TICK) {
-            tickLower += tickSpacing;
-        }
 
-        tickUpper = (TickMath.MAX_TICK / tickSpacing) * tickSpacing;
-        if (tickUpper > TickMath.MAX_TICK) {
-            tickUpper -= tickSpacing;
-        }
+        // revert if liquidity calculation is invalid
+        if (liquidity == 0) revert NoLiquidity();
     }
 
     function _sortedTokenData() internal view returns (address token0, address token1, uint160 sqrtPriceX96) {
