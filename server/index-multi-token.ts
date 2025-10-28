@@ -118,7 +118,7 @@ const queueProcessor = new MintQueueProcessor(
 // Run with: npm run lp-deployer
 
 // Deployment fee constants
-const DEPLOY_FEE_USDC = BigInt(1 * 10 ** 6); // 1 USDC
+const DEPLOY_FEE_USDC = BigInt(10 * 10 ** 6); // 10 USDC
 
 /**
  * Generate a unique transaction hash for minting
@@ -159,7 +159,7 @@ app.post("/api/deploy", async (req, res) => {
   }
 
   try {
-    const { name, symbol, mintAmount, maxMintCount, price, paymentToken, deployer, authorization } = req.body;
+    const { name, symbol, mintAmount, maxMintCount, price, paymentToken, deployer, authorization, imageUrl, description } = req.body;
 
     // Validation
     if (!name || !symbol || !mintAmount || !maxMintCount || !price || !paymentToken || !deployer) {
@@ -230,7 +230,7 @@ app.post("/api/deploy", async (req, res) => {
       if (BigInt(authorization.value) !== DEPLOY_FEE_USDC) {
         return res.status(400).json({
           error: "Invalid payment amount",
-          message: `Payment must be exactly 1 USDC (${DEPLOY_FEE_USDC.toString()} wei)`,
+          message: `Payment must be exactly 10 USDC (${DEPLOY_FEE_USDC.toString()} wei)`,
         });
       }
 
@@ -299,6 +299,8 @@ app.post("/api/deploy", async (req, res) => {
       network,
       deployer,
       excessRecipient: excessRecipient, // Pass the excess recipient
+      imageUrl: imageUrl || undefined,
+      description: description || undefined,
     };
 
     // Deploy token

@@ -38,6 +38,8 @@ export interface TokenDeployConfig {
   network: 'base-sepolia' | 'base';
   deployer: string;
   excessRecipient?: string; // Address to receive excess USDC (defaults to deployer)
+  imageUrl?: string; // Token logo URL
+  description?: string; // Token description
 }
 
 interface DeployResult {
@@ -270,9 +272,10 @@ export async function saveDeployedToken(
       lp_deployer_address,
       payment_seed, pool_seed_amount,
       network, max_supply, total_supply,
-      deploy_tx_hash, deploy_block_number
+      deploy_tx_hash, deploy_block_number,
+      logo_url, description
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
     )
     RETURNING *
   `;
@@ -295,6 +298,8 @@ export async function saveDeployedToken(
     poolSeedAmount.toString(), // Initial supply (LP seed)
     deployResult.txHash,
     deployResult.blockNumber,
+    config.imageUrl || null,
+    config.description || null,
   ];
 
   const result = await pool.query(query, values);
