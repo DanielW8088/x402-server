@@ -324,9 +324,10 @@ export async function saveDeployedToken(
   const excessRecipient = config.excessRecipient || config.deployer;
 
   const mintAmountWei = BigInt(config.mintAmount) * BigInt(10 ** 18);
-  const maxSupply = BigInt(2_000_000_000) * BigInt(10 ** 18);
   const totalUserMint = mintAmountWei * BigInt(config.maxMintCount);
   const poolSeedAmount = totalUserMint / BigInt(4);
+  // Calculate actual max supply: pool seed + user mintable
+  const maxSupply = poolSeedAmount + totalUserMint;
   const pricePerMintUSDC = BigInt(config.price) * BigInt(10 ** 6);
   const requiredPayment = (poolSeedAmount * pricePerMintUSDC) / mintAmountWei;
 

@@ -29,7 +29,6 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     error ArrayLengthMismatch();
     error AlreadyMinted(address to, bytes32 txHash);
     error MaxMintCountExceeded();
-    error MaxSupplyExceeded();
     error AuthorizationStateInvalid(address authorizer, bytes32 nonce);
     error AuthorizationExpired(uint256 nowTime, uint256 validBefore);
     error AuthorizationNotYetValid(uint256 nowTime, uint256 validAfter);
@@ -52,7 +51,6 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
     // ==================== Constants ====================
 
-    uint256 public constant MAX_SUPPLY = 2_000_000_000 * 10**18;
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
     // --- EIP-3009 typehashes ---
@@ -121,20 +119,16 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         if (_poolSeedAmount == 0) revert InvalidAmount();
         
         // Validate supply constraints
-        // Ensure pool seed doesn't exceed max supply
-        if (_poolSeedAmount > MAX_SUPPLY) revert MaxSupplyExceeded();
-        
-        // Ensure total supply (pool + user mints) doesn't exceed max supply
-        // Note: Using unchecked math here is safe because we check overflow explicitly
+        // Check for overflow in multiplication (total user mintable amount)
         unchecked {
             uint256 totalUserMintable = _mintAmount * _maxMintCount;
-            // Check for overflow in multiplication
+            // Ensure multiplication didn't overflow
             if (_maxMintCount > 0 && totalUserMintable / _maxMintCount != _mintAmount) {
-                revert MaxSupplyExceeded();
+                revert InvalidAmount();
             }
-            // Check total supply constraint
-            if (_poolSeedAmount + totalUserMintable > MAX_SUPPLY) {
-                revert MaxSupplyExceeded();
+            // Ensure addition doesn't overflow (pool + user mints)
+            if (_poolSeedAmount + totalUserMintable < _poolSeedAmount) {
+                revert InvalidAmount();
             }
         }
         
@@ -283,10 +277,6 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         if (_mintCount + to.length > MAX_MINT_COUNT) {
             revert MaxMintCountExceeded();
         }
-        uint256 totalMintAmount = MINT_AMOUNT * to.length;
-        if (totalSupply() + totalMintAmount > MAX_SUPPLY) {
-            revert MaxSupplyExceeded();
-        }
 
         for (uint256 i = 0; i < to.length; i++) {
             if (hasMinted[txHashes[i]]) {
@@ -420,11 +410,6 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         // Return actual total supply: user mintable + LP pool
         // This is the real total supply that will exist after all mints and LP deployment
         return (MINT_AMOUNT * MAX_MINT_COUNT) + POOL_SEED_AMOUNT;
-    }
-
-    function hardCapSupply() external pure returns (uint256) {
-        // Return the hard-coded maximum supply limit (for reference)
-        return MAX_SUPPLY;
     }
 
     function liquidityDeployed() external view returns (bool) {
