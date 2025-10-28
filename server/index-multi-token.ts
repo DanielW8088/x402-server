@@ -282,10 +282,14 @@ app.post("/api/deploy", async (req, res) => {
       
       if (v === 0 || v === 1) v = v + 27;
       
-      const gasPrice = await publicClient.getGasPrice();
-      const gasPriceWithBuffer = (gasPrice * 150n) / 100n;
+      // EIP-1559 省钱模式
+      const block = await publicClient.getBlock();
+      const baseFeePerGas = block.baseFeePerGas || 100000000n;
+      const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
+      const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
       
       console.log(`   Executing transferWithAuthorization from ${authorization.from}...`);
+      console.log(`   💰 Gas: ${Number(maxFeePerGas) / 1e9} gwei (EIP-1559)`);
       
       const paymentHash = await walletClient.writeContract({
         address: usdcAddress,
@@ -302,8 +306,9 @@ app.post("/api/deploy", async (req, res) => {
           r,
           s,
         ],
-        gas: 200000n,
-        gasPrice: gasPriceWithBuffer,
+        gas: 150000n, // 降低 gas limit
+        maxFeePerGas,
+        maxPriorityFeePerGas,
       });
       
       console.log(`   ✅ Payment transaction: ${paymentHash}`);
@@ -653,8 +658,11 @@ app.post("/api/mint/:address", async (req, res) => {
         
         if (v === 0 || v === 1) v = v + 27;
         
-        const gasPrice = await publicClient.getGasPrice();
-        const gasPriceWithBuffer = (gasPrice * 150n) / 100n;
+        // EIP-1559 省钱模式
+        const block = await publicClient.getBlock();
+        const baseFeePerGas = block.baseFeePerGas || 100000000n;
+        const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
+        const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
         
         const authHash = await walletClient.writeContract({
           address: paymentTokenAddress,
@@ -671,8 +679,9 @@ app.post("/api/mint/:address", async (req, res) => {
             r,
             s,
           ],
-          gas: 200000n,
-          gasPrice: gasPriceWithBuffer,
+          gas: 150000n, // 降低 gas limit
+          maxFeePerGas,
+          maxPriorityFeePerGas,
         });
         
         console.log(`✅ USDC transfer executed: ${authHash}`);

@@ -359,14 +359,15 @@ class StandaloneLPDeployer {
       console.log(`\n💧 Deploying LP for ${symbol} (${tokenAddress})...`);
       console.log(`   Pool config: fee=${poolFee} (${poolFee/10000}%)`);
 
-      const gasPrice = await this.publicClient.getGasPrice();
-      const minGasPrice = 100000000n; // 0.1 gwei
-      // Use 5x buffer to avoid "replacement transaction underpriced"
-      const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 500n) / 100n : minGasPrice;
-      const finalGasPrice = gasPriceWithBuffer > minGasPrice ? gasPriceWithBuffer : minGasPrice;
+      // EIP-1559 省钱模式
+      const block = await this.publicClient.getBlock();
+      const baseFeePerGas = block.baseFeePerGas || 100000000n; // 0.1 gwei
+      const maxPriorityFeePerGas = 10000000n; // 0.01 gwei (LP 部署可以稍微快一点)
+      const maxFeePerGas = (baseFeePerGas * 120n) / 100n + maxPriorityFeePerGas; // 20% buffer
 
-      console.log(`   Current gas price: ${gasPrice} wei (${Number(gasPrice) / 1e9} gwei)`);
-      console.log(`   Using gas price (5x buffer): ${finalGasPrice} wei (${Number(finalGasPrice) / 1e9} gwei)`);
+      console.log(`   💰 EIP-1559 Gas:`);
+      console.log(`      - Base Fee: ${Number(baseFeePerGas) / 1e9} gwei`);
+      console.log(`      - Max Fee: ${Number(maxFeePerGas) / 1e9} gwei`);
 
       const lpDeployerAddress = this.lpWalletClient.account!.address;
 
@@ -378,7 +379,8 @@ class StandaloneLPDeployer {
         abi: tokenAbi,
         functionName: "transferAssetsForLP",
         gas: 300000n,
-        gasPrice: finalGasPrice,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
       } as any);
 
       console.log(`   ⏳ Waiting for asset transfer: ${transferHash}`);
@@ -534,14 +536,15 @@ class StandaloneLPDeployer {
     usdcAmount: bigint,
     retryCount: number
   ) {
-    const gasPrice = await this.publicClient.getGasPrice();
-    const minGasPrice = 100000000n; // 0.1 gwei
-    // Use 5x buffer to avoid "replacement transaction underpriced"
-    const gasPriceWithBuffer = gasPrice > 0n ? (gasPrice * 500n) / 100n : minGasPrice;
-    const finalGasPrice = gasPriceWithBuffer > minGasPrice ? gasPriceWithBuffer : minGasPrice;
+    // EIP-1559 省钱模式
+    const block = await this.publicClient.getBlock();
+    const baseFeePerGas = block.baseFeePerGas || 100000000n; // 0.1 gwei
+    const maxPriorityFeePerGas = 10000000n; // 0.01 gwei
+    const maxFeePerGas = (baseFeePerGas * 120n) / 100n + maxPriorityFeePerGas;
 
-    console.log(`   Current gas price: ${gasPrice} wei (${Number(gasPrice) / 1e9} gwei)`);
-    console.log(`   Using gas price (5x buffer): ${finalGasPrice} wei (${Number(finalGasPrice) / 1e9} gwei)`);
+    console.log(`   💰 EIP-1559 Gas:`);
+    console.log(`      - Base Fee: ${Number(baseFeePerGas) / 1e9} gwei`);
+    console.log(`      - Max Fee: ${Number(maxFeePerGas) / 1e9} gwei`);
 
     const lpDeployerAddress = this.lpWalletClient.account!.address;
 
@@ -658,7 +661,8 @@ class StandaloneLPDeployer {
         functionName: "createAndInitializePoolIfNecessary",
         args: [token0, token1, poolFee, sqrtPriceX96],
         gas: 500000n,
-        gasPrice: finalGasPrice,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
       } as any);
 
       await this.publicClient.waitForTransactionReceipt({
@@ -694,7 +698,8 @@ class StandaloneLPDeployer {
       functionName: "approve",
       args: [this.positionManagerAddress, amount0],
       gas: 100000n,
-      gasPrice: finalGasPrice,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
     } as any);
     const approve0Receipt = await this.publicClient.waitForTransactionReceipt({ 
       hash: approve0Hash,
@@ -713,7 +718,8 @@ class StandaloneLPDeployer {
       functionName: "approve",
       args: [this.positionManagerAddress, amount1],
       gas: 100000n,
-      gasPrice: finalGasPrice,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
     } as any);
     const approve1Receipt = await this.publicClient.waitForTransactionReceipt({ 
       hash: approve1Hash,
@@ -796,7 +802,8 @@ class StandaloneLPDeployer {
         functionName: "mint",
         args: [mintParams],
         gas: 1000000n,
-        gasPrice: finalGasPrice,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
       } as any);
 
       console.log(`   ⏳ Waiting for LP position mint: ${mintHash}`);

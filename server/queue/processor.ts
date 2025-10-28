@@ -279,42 +279,57 @@ export class MintQueueProcessor {
         throw new Error(`Insufficient supply: need ${totalRequired}, have ${remainingSupply}`);
       }
 
-      // Get gas price with buffer
-      const gasPrice = await this.publicClient.getGasPrice();
-      console.log(`   Current gas price: ${gasPrice} wei (${Number(gasPrice) / 1e9} gwei)`);
+      // Use EIP-1559 for Base (much cheaper!)
+      const block = await this.publicClient.getBlock();
+      const baseFeePerGas = block.baseFeePerGas || 100000000n; // 0.1 gwei fallback
       
-      // Use 3x buffer with minimum of 0.1 gwei for Base network
-      const minGasPrice = 100000000n; // 0.1 gwei minimum
-      const gasPriceWithBuffer = gasPrice > 0n 
-        ? (gasPrice * 300n) / 100n  // 3x buffer
-        : minGasPrice;
-      const finalGasPrice = gasPriceWithBuffer > minGasPrice ? gasPriceWithBuffer : minGasPrice;
+      // Priority fee (miner tip) - Base is cheap, very low tip needed
+      const maxPriorityFeePerGas = 1000000n; // 0.001 gwei (省钱模式)
       
-      console.log(`   Using gas price: ${finalGasPrice} wei (${Number(finalGasPrice) / 1e9} gwei)`);
+      // Max fee = base fee * 1.1 + priority fee (只加 10% buffer，不是 300%)
+      const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
+      
+      console.log(`   💰 EIP-1559 Gas (省钱模式):`);
+      console.log(`      - Base Fee: ${Number(baseFeePerGas) / 1e9} gwei`);
+      console.log(`      - Priority Fee: ${Number(maxPriorityFeePerGas) / 1e9} gwei`);
+      console.log(`      - Max Fee: ${Number(maxFeePerGas) / 1e9} gwei`);
       console.log(`   🎨 Minting to ${items.length} address(es)...`);
 
       // Use batchMint for multiple addresses, mint for single address
       let hash: `0x${string}`;
+      let gasLimit: bigint;
       
       if (items.length === 1) {
+        gasLimit = 150000n; // 降低单个 mint 的 gas limit
         hash = await this.walletClient.writeContract({
           address: tokenAddress,
           abi: tokenAbi,
           functionName: "mint",
           args: [addresses[0], txHashes[0]],
-          gas: 200000n,
-          gasPrice: finalGasPrice,
+          gas: gasLimit,
+          maxFeePerGas,
+          maxPriorityFeePerGas,
         } as any);
       } else {
+        // 批量更省：基础 100k + 每个地址 50k
+        gasLimit = BigInt(100000 + 50000 * items.length);
         hash = await this.walletClient.writeContract({
           address: tokenAddress,
           abi: tokenAbi,
           functionName: "batchMint",
           args: [addresses, txHashes],
-          gas: BigInt(150000 * items.length),
-          gasPrice: finalGasPrice,
+          gas: gasLimit,
+          maxFeePerGas,
+          maxPriorityFeePerGas,
         } as any);
       }
+      
+      // 估算成本
+      const estimatedCostWei = gasLimit * maxFeePerGas;
+      const estimatedCostEth = Number(estimatedCostWei) / 1e18;
+      const costPerUser = estimatedCostEth / items.length;
+      console.log(`   💸 Estimated Cost: ${estimatedCostEth.toFixed(6)} ETH (~$${(estimatedCostEth * 2500).toFixed(2)} @ $2500/ETH)`);
+      console.log(`   👤 Per User: ${costPerUser.toFixed(6)} ETH (~$${(costPerUser * 2500).toFixed(4)})`)
 
       console.log(`   ✅ Batch mint transaction sent: ${hash}`);
 
@@ -333,7 +348,18 @@ export class MintQueueProcessor {
         timeout: 120_000,
       });
 
+      // 计算实际成本
+      const actualGasUsed = receipt.gasUsed;
+      const effectiveGasPrice = receipt.effectiveGasPrice || 0n;
+      const actualCostWei = actualGasUsed * effectiveGasPrice;
+      const actualCostEth = Number(actualCostWei) / 1e18;
+      const actualCostPerUser = actualCostEth / items.length;
+      
       console.log(`✅ Batch confirmed in block ${receipt.blockNumber}`);
+      console.log(`   💰 Actual Cost: ${actualCostEth.toFixed(6)} ETH ($${(actualCostEth * 2500).toFixed(2)})`);
+      console.log(`   👤 Per User: ${actualCostPerUser.toFixed(6)} ETH ($${(actualCostPerUser * 2500).toFixed(4)})`);
+      console.log(`   ⛽ Gas Used: ${actualGasUsed} / ${gasLimit} (${(Number(actualGasUsed) * 100 / Number(gasLimit)).toFixed(1)}% efficiency)`);
+      console.log(`   💸 Effective Gas Price: ${Number(effectiveGasPrice) / 1e9} gwei`);
 
       if (receipt.status !== "success") {
         throw new Error(`Transaction reverted: ${hash}`);
