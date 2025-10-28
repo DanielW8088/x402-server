@@ -2,8 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'token-server',
-      script: 'index-multi-token.ts',
-      interpreter: 'tsx',
+      script: 'dist/index-multi-token.js',
       instances: 1,
       autorestart: true,
       watch: false,
