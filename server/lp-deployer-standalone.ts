@@ -7,7 +7,7 @@
 
 import { Pool } from "pg";
 import {
-  Address,
+  type Address,
   createPublicClient,
   createWalletClient,
   encodeAbiParameters,
@@ -69,20 +69,6 @@ const permit2ApproveAbi = [
   },
 ] as const;
 
-interface MintParams {
-  token0: `0x${string}`;
-  token1: `0x${string}`;
-  fee: number;
-  tickLower: number;
-  tickUpper: number;
-  amount0Desired: bigint;
-  amount1Desired: bigint;
-  amount0Min: bigint;
-  amount1Min: bigint;
-  recipient: `0x${string}`;
-  deadline: bigint;
-}
-
 class StandaloneLPDeployer {
   private pool: Pool;
   private adminWalletClient: any;
@@ -99,12 +85,12 @@ class StandaloneLPDeployer {
 
   constructor() {
     // Validate environment variables
-    if (!process.env.DATABASE_URL) {
-      throw new Error("❌ DATABASE_URL environment variable is required");
-    }
-    if (!process.env.PRIVATE_KEY) {
-      throw new Error("❌ PRIVATE_KEY environment variable is required (for calling transferAssetsForLP)");
-    }
+    // if (!process.env.DATABASE_URL) {
+    //   throw new Error("❌ DATABASE_URL environment variable is required");
+    // }
+    // if (!process.env.PRIVATE_KEY) {
+    //   throw new Error("❌ PRIVATE_KEY environment variable is required (for calling transferAssetsForLP)");
+    // }
     if (!process.env.LP_DEPLOYER_PRIVATE_KEY) {
       throw new Error("❌ LP_DEPLOYER_PRIVATE_KEY environment variable is required (for deploying LP)");
     }
@@ -145,12 +131,12 @@ class StandaloneLPDeployer {
     });
 
     // Admin wallet (for calling transferAssetsForLP)
-    const adminAccount = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
-    this.adminWalletClient = createWalletClient({
-      account: adminAccount,
-      chain,
-      transport: http(rpcUrl),
-    });
+    // const adminAccount = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
+    // this.adminWalletClient = createWalletClient({
+    //   account: adminAccount,
+    //   chain,
+    //   transport: http(rpcUrl),
+    // });
 
     // LP deployer wallet (for deploying LP)
     const lpAccount = privateKeyToAccount(process.env.LP_DEPLOYER_PRIVATE_KEY as `0x${string}`);
@@ -163,7 +149,7 @@ class StandaloneLPDeployer {
     console.log(`🔧 Standalone LP Deployer initialized`);
     console.log(`   Network: ${network}`);
     console.log(`   RPC: ${rpcUrl}`);
-    console.log(`   Admin: ${adminAccount.address}`);
+    // console.log(`   Admin: ${adminAccount.address}`);
     console.log(`   LP Deployer: ${lpAccount.address}`);
     console.log(`   Position Manager: ${this.positionManagerAddress}`);
     console.log(`   Factory: ${this.factoryAddress}`);
@@ -174,14 +160,15 @@ class StandaloneLPDeployer {
     console.log(`   Check interval: ${this.checkInterval / 1000}s\n`);
 
     // Initial check
+    // 5 usdc amount and 1000 token amount for testing
     await this.deployLP(
-      "0x0000000000000000000000000000000000000000" as `0x${string}`,
-      "Init",
-      "INIT",
+      "0x720118758647120104cdd76386484E5c0c286517" as `0x${string}`,
+      "0x402",
+      "0X402",
       10000,
-      "0x0000000000000000000000000000000000000000" as `0x${string}`,
-      0n,
-      0n,
+      "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as `0x${string}`,
+      5000000n,
+      1000000000n,
       0
     );
 

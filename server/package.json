@@ -26,9 +26,10 @@
     "@uniswap/v4-sdk": "^1.22.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "ethers": "^6.15.0",
     "express": "^4.21.2",
     "pg": "^8.13.1",
-    "viem": "^2.21.54",
+    "viem": "^2.38.5",
     "x402-express": "latest"
   },
   "devDependencies": {
