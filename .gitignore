@@ -2,7 +2,7 @@ node_modules/
 .env
 dist/
 *.log
-
+.env.local
 # Hardhat
 cache/
 artifacts/
