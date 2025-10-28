@@ -56,13 +56,13 @@ cp env.multi-token.example .env
 
 ### Start token server only:
 ```bash
-pm2 start ecosystem.config.js --only token-server
+pm2 start ecosystem.config.cjs --only token-server
 pm2 save
 ```
 
 ### Start all services:
 ```bash
-pm2 start ecosystem.config.js
+pm2 start ecosystem.config.cjs
 pm2 save
 ```
 
@@ -107,6 +107,12 @@ npx tsx index-multi-token.ts
 ```
 
 ## Troubleshooting
+
+### module is not defined in ES module scope:
+If you see this error when starting PM2, it's because the project uses `"type": "module"` in package.json. Use the `.cjs` extension for PM2 config:
+```bash
+pm2 start ecosystem.config.cjs
+```
 
 ### SSL certificate verification errors:
 

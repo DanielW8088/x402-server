@@ -468,6 +468,7 @@ app.get("/api/tokens", async (req, res) => {
           liquidityDeployed: liquidityDeployed, // Live or DB data
           createdAt: token.created_at,
           mintUrl: `/mint/${token.address}`,
+          logoUrl: token.logo_url || null,
         };
       } catch (err) {
         // Fallback to database data if chain read fails
@@ -494,6 +495,7 @@ app.get("/api/tokens", async (req, res) => {
           liquidityDeployed: token.liquidity_deployed, // Fallback to DB data
           createdAt: token.created_at,
           mintUrl: `/mint/${token.address}`,
+          logoUrl: token.logo_url || null,
         };
       }
     }));
@@ -587,6 +589,7 @@ app.get("/api/tokens/:address", async (req, res) => {
       paymentToken: dbToken?.payment_token_symbol || "USDC",
       deployer: dbToken?.deployer_address,
       paymentAddress: address, // USDC should be sent to token contract
+      logoUrl: dbToken?.logo_url || null,
     });
   } catch (error: any) {
     console.error("❌ Error fetching token info:", error.message);

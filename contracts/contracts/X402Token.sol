@@ -416,7 +416,7 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         return MINT_AMOUNT;
     }
 
-    function maxSupply() external view returns (uint256) {
+    function maxSupply() external pure returns (uint256) {
         return MAX_SUPPLY;
     }
 
