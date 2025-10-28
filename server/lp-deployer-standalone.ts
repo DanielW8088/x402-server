@@ -98,9 +98,9 @@ class StandaloneLPDeployer {
     // Network config
     const network = process.env.NETWORK || "baseSepolia";
     const chain = network === "base" ? base : baseSepolia;
-    const rpcUrl = process.env.RPC_URL || (network === "base" 
-      ? "https://mainnet.base.org" 
-      : "https://sepolia.base.org");
+    const rpcUrl = network === "base"
+      ? (process.env.BASE_RPC_URL || "https://mainnet.base.org")
+      : (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org");
 
     // Position Manager and Factory addresses
     this.positionManagerAddress = (network === "base"

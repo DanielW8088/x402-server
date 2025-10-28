@@ -62,15 +62,22 @@ const pool = new Pool({
 const chain = network === "base-sepolia" ? baseSepolia : base;
 const account = privateKeyToAccount(serverPrivateKey);
 
+// RPC URL configuration
+const rpcUrl = network === "base-sepolia" 
+  ? (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org")
+  : (process.env.BASE_RPC_URL || "https://mainnet.base.org");
+
+console.log(`🌐 Using RPC: ${rpcUrl}`);
+
 const walletClient = createWalletClient({
   account,
   chain,
-  transport: http(),
+  transport: http(rpcUrl),
 }) as any; // Type assertion to avoid viem version conflicts
 
 const publicClient = createPublicClient({
   chain,
-  transport: http(),
+  transport: http(rpcUrl),
 }) as any; // Type assertion to avoid viem version conflicts
 
 // Contract ABIs
@@ -793,8 +800,9 @@ app.get("/api/queue/stats", async (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
+    version: "1.0.0",
+    timestamp: new Date().toISOString(),
     network,
-    excessRecipient: excessRecipient ? getAddress(excessRecipient) : "Not configured",
     database: true,
     queueProcessor: "enabled",
   });
