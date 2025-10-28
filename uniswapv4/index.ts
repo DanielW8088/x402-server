@@ -83,7 +83,6 @@ const CHAIN = USE_BASE_SEPOLIA ? baseSepolia : base;
 const RPC = USE_BASE_SEPOLIA ? "https://sepolia.base.org" : process.env.BASE_RPC_URL || "https://mainnet.base.org"; // set your mainnet RPC if needed
 
 // Replace with your deployer key
-const LP_DEPLOYER_PK = "0x...";
 const lpAccount = privateKeyToAccount(LP_DEPLOYER_PK as `0x${string}`);
 
 // Example addresses (Base Sepolia):
@@ -123,8 +122,8 @@ export async function deployLP(
   symbol: string,
   poolFee: number,
   paymentTokenAddress: `0x${string}`, // USDC
-  tokenAmountToDeployLP: bigint, // token side for LP
   usdcAmountToDeployLP: bigint, // USDC side for LP
+  tokenAmountToDeployLP: bigint, // token side for LP
   retryCount: number
 ) {
   const account = walletClient.account!.address as Address;
