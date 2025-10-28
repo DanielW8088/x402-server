@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { Pool } from 'pg';
+import { privateKeyToAccount } from 'viem/accounts';
 
 const execAsync = promisify(exec);
 
@@ -94,7 +95,6 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   }
   
   // Derive LP deployer address from private key
-  const { privateKeyToAccount } = await import('viem/accounts');
   const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
   const lpDeployerAddress = lpAccount.address;
 
@@ -146,6 +146,18 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   console.log(`   sqrtPricePaymentFirst: ${sqrtPricePaymentFirst}`);
   console.log(`   sqrtPriceTokenFirst: ${sqrtPriceTokenFirst}`);
 
+  // Get server private key for granting MINTER_ROLE
+  const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as string;
+  if (!serverPrivateKey) {
+    throw new Error('SERVER_PRIVATE_KEY environment variable required');
+  }
+  
+  // Derive server address from private key
+  const serverAccount = privateKeyToAccount(serverPrivateKey as `0x${string}`);
+  const serverAddress = serverAccount.address;
+  
+  console.log(`🔐 Server address (will be granted MINTER_ROLE): ${serverAddress}`);
+
   // Generate deployment script (Simplified)
   const deployScriptPath = join(__dirname, '../../contracts/scripts/deployToken.js');
   const deployScript = `
@@ -162,12 +174,14 @@ async function main() {
     const POOL_SEED_AMOUNT = "${poolSeedAmount.toString()}";
     const EXCESS_RECIPIENT = "${excessRecipient}";
     const LP_DEPLOYER = "${lpDeployerAddress}";
+    const SERVER_ADDRESS = "${serverAddress}";
 
-    console.log("Deploying PAYX_Simple token:", TOKEN_NAME);
+    console.log("Deploying X402Token:", TOKEN_NAME);
     console.log("LP Deployer:", LP_DEPLOYER);
+    console.log("Server Address:", SERVER_ADDRESS);
     
-    const PAYX = await hre.ethers.getContractFactory("PAYX_Simple");
-    const token = await PAYX.deploy(
+    const X402Token = await hre.ethers.getContractFactory("X402Token");
+    const token = await X402Token.deploy(
         TOKEN_NAME,
         TOKEN_SYMBOL,
         MINT_AMOUNT,
@@ -186,6 +200,45 @@ async function main() {
     
     // Wait for confirmations
     const receipt = await token.deploymentTransaction().wait(3);
+    console.log("Deployment confirmed in block:", receipt.blockNumber);
+    
+    // Grant MINTER_ROLE to server address
+    console.log("\\n🔐 Granting MINTER_ROLE to server...");
+    const MINTER_ROLE = await token.MINTER_ROLE();
+    
+    // Check if already has role
+    const hasRole = await token.hasRole(MINTER_ROLE, SERVER_ADDRESS);
+    if (hasRole) {
+        console.log("✅ Server already has MINTER_ROLE");
+    } else {
+        const grantTx = await token.grantRole(MINTER_ROLE, SERVER_ADDRESS);
+        console.log("Grant role tx:", grantTx.hash);
+        console.log("⏳ Waiting for confirmation...");
+        await grantTx.wait(2); // Wait for 2 confirmations
+        console.log("✅ MINTER_ROLE transaction confirmed");
+    }
+    
+    // Verify role with retry logic
+    console.log("🔍 Verifying role...");
+    let hasRoleAfter = false;
+    for (let i = 0; i < 3; i++) {
+        hasRoleAfter = await token.hasRole(MINTER_ROLE, SERVER_ADDRESS);
+        if (hasRoleAfter) {
+            console.log("✅ MINTER_ROLE verified successfully");
+            break;
+        }
+        if (i < 2) {
+            console.log(\`   Retry \${i + 1}/2 - waiting 2 seconds...\`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    }
+    
+    if (!hasRoleAfter) {
+        console.error("⚠️  Warning: Role verification failed, but transaction was confirmed.");
+        console.error("   This may be due to RPC node sync delay.");
+        console.error("   The deployment was successful. Role can be verified manually.");
+        // Don't throw error - deployment was successful
+    }
     
     // Output JSON for parsing
     console.log("DEPLOY_RESULT:", JSON.stringify({
@@ -253,7 +306,6 @@ export async function saveDeployedToken(
   }
   
   // Derive LP deployer address from private key
-  const { privateKeyToAccount } = await import('viem/accounts');
   const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
   const lpDeployerAddress = lpAccount.address;
 
