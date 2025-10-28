@@ -19,3 +19,4 @@ typechain-types/
 .DS_Store
 Thumbs.db
 
+server/package-lock.json

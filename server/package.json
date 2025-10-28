@@ -22,6 +22,8 @@
     "@coinbase/x402": "latest",
     "@types/cors": "^2.8.19",
     "@types/pg": "^8.11.10",
+    "@uniswap/v3-sdk": "^3.26.0",
+    "@uniswap/v4-sdk": "^1.22.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
