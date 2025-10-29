@@ -753,6 +753,46 @@ app.post("/api/mint/:address", async (req, res) => {
     
     console.log(`✅ Payment recipient verified: ${tokenAddress}`);
     
+    // 🔒 CRITICAL: Verify payment amount matches token price
+    let expectedPrice: bigint;
+    if (pool) {
+      const dbToken = await getToken(pool, tokenAddress);
+      if (!dbToken) {
+        return res.status(404).json({
+          error: "Token not found",
+          message: `Token ${tokenAddress} not found in database`,
+        });
+      }
+      // Extract price from "1 USDC" format
+      const priceMatch = dbToken.price.match(/[\d.]+/);
+      if (!priceMatch) {
+        return res.status(500).json({
+          error: "Invalid token price",
+          message: "Token price format is invalid in database",
+        });
+      }
+      const priceInUSDC = parseFloat(priceMatch[0]);
+      expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)); // Convert to USDC wei (6 decimals)
+    } else {
+      return res.status(503).json({
+        error: "Database not configured",
+        message: "Cannot verify payment amount without database",
+      });
+    }
+    
+    const providedValue = BigInt(authorization.value);
+    if (providedValue !== expectedPrice) {
+      console.error(`❌ Invalid payment amount: expected ${expectedPrice}, got ${providedValue}`);
+      return res.status(400).json({
+        error: "Invalid payment amount",
+        message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei), but got ${Number(providedValue) / 1e6} USDC`,
+        expected: expectedPrice.toString(),
+        provided: providedValue.toString(),
+      });
+    }
+    
+    console.log(`✅ Payment amount verified: ${Number(expectedPrice) / 1e6} USDC`);
+    
     // Execute transferWithAuthorization (payment verification)
     try {
       const sig = authorization.signature.startsWith('0x') 
