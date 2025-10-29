@@ -13,6 +13,7 @@ import {
   getToken, 
   getAllTokens,
   updateTokenMintCount,
+  verifyContract,
   TokenDeployConfig 
 } from "./services/tokenDeployer.js";
 import { initDatabase } from "./db/init.js";
@@ -254,6 +255,28 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
         const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
         
         console.log(`✅ Token deployed after payment: ${savedToken.address}`);
+        
+        // Trigger contract verification asynchronously (don't block deployment response)
+        // Wait a few seconds for contract to be indexed by block explorer
+        setTimeout(async () => {
+          try {
+            console.log(`🔍 Starting automatic verification for ${savedToken.address}...`);
+            const verifyResult = await verifyContract(pool, savedToken.address);
+            
+            if (verifyResult.success) {
+              console.log(`✅ Auto-verification successful for ${savedToken.address}`);
+              if (verifyResult.guid) {
+                console.log(`   GUID: ${verifyResult.guid}`);
+              }
+            } else {
+              console.warn(`⚠️  Auto-verification failed for ${savedToken.address}: ${verifyResult.error}`);
+              console.warn(`   Contract is deployed successfully. Verification can be retried manually.`);
+            }
+          } catch (verifyError: any) {
+            console.warn(`⚠️  Auto-verification error for ${savedToken.address}: ${verifyError.message}`);
+            console.warn(`   Contract is deployed successfully. Verification can be retried manually.`);
+          }
+        }, 15000); // Wait 15 seconds for block explorer indexing
         
         // Return deployment result
         return {
