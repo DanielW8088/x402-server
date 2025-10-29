@@ -195,7 +195,7 @@ class StandaloneLPDeployer {
   private publicClient: any;
   private launchToolAddress: `0x${string}`;
   private factoryAddress: `0x${string}`;
-  private checkInterval: number = 15000; // 15 seconds
+  private checkInterval: number = 60000; // 60 seconds (1 minute)
   private monitorInterval: NodeJS.Timeout | null = null;
   private processingTokens: Set<string> = new Set();
   private isProcessing: boolean = false;

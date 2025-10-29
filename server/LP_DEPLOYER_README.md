@@ -92,7 +92,7 @@ pm2 status
 
 ## 工作流程
 
-服务每 15 秒检查一次数据库，自动执行:
+服务每 60 秒（1分钟）检查一次数据库，自动执行:
 
 1. **查询待部署 token**: `liquidity_deployed = false AND is_active = true`
 2. **检查 token 状态**: `mintingCompleted = true AND lpLive = false`
@@ -167,7 +167,7 @@ WHERE address = '0xYourTokenAddress';
 ### "Minting not completed yet"
 ```bash
 # 原因: Token 的 minting 还未完成
-# 行为: 不记录错误，等待 15 秒后继续检查
+# 行为: 不记录错误，等待 1 分钟后继续检查
 # 无需干预: 系统会自动监控直到 minting 完成
 ```
 
@@ -208,7 +208,7 @@ pm2 restart lp-deployer
 - **状态检查未通过** (不计入失败):
   - `Minting not completed yet` - minting 未完成，继续等待
   - `LP already live` - LP 已部署，跳过
-  - 不记录错误，下次轮询（15秒）继续检查
+  - 不记录错误，下次轮询（1分钟）继续检查
 
 - **部署失败** (计入重试):
   - 交易失败、余额不足、权限错误等
@@ -284,7 +284,7 @@ NETWORK=base
 
 ## 核心特性
 
-- ✅ 自动监控（15秒轮询）
+- ✅ 自动监控（1分钟轮询）
 - ✅ 自动白名单（setLaunchTool）
 - ✅ 正确定价（1 USDC = MINT_AMOUNT tokens）
 - ✅ 错误重试（最多5次）
