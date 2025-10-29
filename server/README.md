@@ -60,13 +60,19 @@ The server will start on port 3002 (default).
 npm run build
 ```
 
-2. Start all services:
+2. Start token server (默认只启动 API 服务):
 ```bash
 pm2 start ecosystem.config.cjs
 pm2 save
 ```
 
-3. Enable auto-start on boot:
+3. (Optional) Start LP deployer if needed:
+```bash
+pm2 start ecosystem.lp-deployer.cjs
+pm2 save
+```
+
+4. Enable auto-start on boot:
 ```bash
 pm2 startup
 # Follow the command it outputs
@@ -77,18 +83,31 @@ pm2 startup
 ```bash
 # Status
 pm2 status
+pm2 list
 
 # Logs
 pm2 logs token-server
 pm2 logs token-server --lines 100
+pm2 logs lp-deployer  # if LP deployer is running
 
-# Control
+# Control token-server
 pm2 restart token-server
 pm2 stop token-server
+pm2 restart token-server --update-env  # update environment variables
+
+# Control lp-deployer (if needed)
+pm2 restart lp-deployer
+pm2 stop lp-deployer
+pm2 delete lp-deployer  # completely remove
 
 # Monitor
 pm2 monit
 ```
+
+### Service Explanation
+
+- **token-server**: Main API server for token deployment and minting (always needed)
+- **lp-deployer**: Background service that automatically deploys Uniswap V3 liquidity pools (optional, only start when needed)
 
 ## API Endpoints
 
@@ -144,13 +163,21 @@ Or disable SSL (not recommended for production):
 DB_SSL_ENABLED=false
 ```
 
-### LP Deployment Stuck
+### LP Deployment Issues
 
+First, ensure LP deployer is running:
 ```bash
-# Check logs
-pm2 logs lp-deployer
+pm2 list  # check if lp-deployer is in the list
+pm2 start ecosystem.lp-deployer.cjs  # start if not running
+```
 
-# Manual reset
+Check logs:
+```bash
+pm2 logs lp-deployer
+```
+
+Manual reset if needed:
+```bash
 psql $DATABASE_URL -c "UPDATE deployed_tokens SET liquidity_deployed = false, lp_retry_count = 0 WHERE address = '0x...';"
 ```
 
