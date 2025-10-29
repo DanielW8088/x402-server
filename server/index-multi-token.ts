@@ -2,7 +2,7 @@ import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
 import { readFileSync } from "fs";
-import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, getAddress, keccak256, toHex, isAddress } from "viem";
+import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, getAddress, keccak256, toHex, isAddress, recoverTypedDataAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { Pool } from "pg";
@@ -17,6 +17,8 @@ import {
 } from "./services/tokenDeployer.js";
 import { initDatabase } from "./db/init.js";
 import { MintQueueProcessor } from "./queue/processor.js";
+import { verify, settle } from "x402/facilitator";
+import { facilitator } from "@coinbase/x402";
 
 config();
 
@@ -56,6 +58,10 @@ function isValidHttpUrl(urlString: string): boolean {
 const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as `0x${string}`;
 const excessRecipient = process.env.EXCESS_RECIPIENT_ADDRESS as `0x${string}`; // Address to receive excess USDC from LP deployment
 const network = (process.env.NETWORK || "base-sepolia") as "base-sepolia" | "base";
+
+// x402 Configuration
+const x402FacilitatorUrl = process.env.X402_FACILITATOR_URL || "https://x402.coinbase.com";
+const x402Enabled = process.env.X402_ENABLED !== 'false'; // Default enabled
 
 // Database configuration
 const databaseUrl = process.env.DATABASE_URL;
@@ -148,6 +154,19 @@ const publicClient = createPublicClient({
   transport: http(rpcUrl),
 }) as any; // Type assertion to avoid viem version conflicts
 
+// Create a combined client with both public and wallet capabilities for x402 settle
+// x402 settle needs verifyTypedData (from public) and transaction signing (from wallet)
+const combinedClient = {
+  ...publicClient,
+  ...walletClient,
+  account,
+  chain,
+  transport: http(rpcUrl),
+} as any;
+
+// x402 is enabled by default, uses Coinbase facilitator
+console.log(`🔐 x402 protocol ${x402Enabled ? 'enabled' : 'disabled'}: ${x402FacilitatorUrl}`);
+
 // Contract ABIs
 const tokenAbi = parseAbi([
   "function mint(address to, bytes32 txHash) external",
@@ -172,12 +191,19 @@ const usdcAbi = parseAbi([
 
 const app = express();
 
-// Enable CORS
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'X-PAYMENT'],
-}));
+// Enable CORS with x402 headers - Allow all headers for x402-fetch compatibility
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', '*'); // Allow all headers to avoid x402-fetch issues
+  res.header('Access-Control-Expose-Headers', 'X-Payment-Required, X-Payment-Version, X-Payment-Response');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
 
 app.use(express.json());
 
@@ -203,6 +229,245 @@ function generateMintTxHash(payer: string, timestamp: number, tokenAddress: stri
   const data = `${payer}-${timestamp}-${tokenAddress}`;
   const hash = keccak256(toHex(data));
   return hash as `0x${string}`;
+}
+
+/**
+ * Generate payment requirements (used for both 402 response and verification)
+ * CRITICAL: payTo must be the token contract address (where payment goes)
+ * asset is the USDC contract address (what token is being paid)
+ */
+function generatePaymentRequirements(
+  tokenAddress: string,
+  quantity: number,
+  totalPrice: number,
+  totalPriceWei: bigint,
+  baseUrl: string
+) {
+  const usdcAddress = network === 'base-sepolia' 
+    ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+    : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+  
+  return {
+    scheme: "exact" as const,
+    description: `Mint ${quantity}x tokens for ${totalPrice} USDC`,
+    network: network as "base-sepolia" | "base",
+    resource: `${baseUrl}/api/mint/${tokenAddress}`,
+    mimeType: "application/json",
+    payTo: tokenAddress as `0x${string}`, // Recipient of payment (token contract)
+    maxAmountRequired: totalPriceWei.toString(),
+    maxTimeoutSeconds: 300,
+    asset: usdcAddress, // Token being paid (USDC)
+  };
+}
+
+/**
+ * Verify x402 payment using facilitator
+ */
+async function verifyX402Payment(
+  paymentHeader: string, 
+  tokenAddress: string,
+  expectedAmount: bigint,
+  quantity: number,
+  req: any
+): Promise<{ valid: boolean; payer?: string; amount?: bigint; error?: string }> {
+  try {
+    console.log(`🔍 Verifying x402 payment...`);
+    
+    // Decode X-PAYMENT header to get PaymentPayload
+    const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+    console.log(`📦 Payment payload:`, JSON.stringify(paymentPayload, null, 2));
+    
+    // Calculate price (must match 402 response)
+    const pricePerMint = Number(expectedAmount) / (1e6 * quantity);
+    const totalPrice = pricePerMint * quantity;
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    
+    // Generate payment requirements (MUST match what was sent in 402 response!)
+    const paymentRequirements = generatePaymentRequirements(
+      tokenAddress,
+      quantity,
+      totalPrice,
+      expectedAmount,
+      baseUrl
+    );
+    
+    console.log(`📋 Payment requirements:`, JSON.stringify(paymentRequirements, null, 2));
+    
+    // Use x402 verify function
+    console.log(`⏳ Calling verify()...`);
+    console.log(`🔍 Verify inputs:`);
+    console.log(`   - publicClient chain:`, (publicClient as any).chain?.id);
+    console.log(`   - paymentPayload.network:`, paymentPayload.network);
+    console.log(`   - paymentRequirements.network:`, paymentRequirements.network);
+    console.log(`   - paymentRequirements.asset:`, paymentRequirements.asset);
+    console.log(`   - authorization.to:`, paymentPayload.payload?.authorization?.to);
+    console.log(`   - authorization.value:`, paymentPayload.payload?.authorization?.value);
+    
+    // For testnet (base-sepolia), use x402.org facilitator
+    // For mainnet (base), use Coinbase facilitator (default)
+    const x402Config = network === 'base-sepolia' 
+      ? { facilitatorUrl: 'https://x402.org/facilitator' }
+      : {};
+    
+    const verifyResult = await verify(
+      publicClient as any,
+      paymentPayload,
+      paymentRequirements,
+      x402Config
+    );
+    
+    console.log(`📊 Verify result:`, JSON.stringify(verifyResult, null, 2));
+    
+    if (verifyResult.isValid) {
+      return {
+        valid: true,
+        payer: verifyResult.payer || paymentPayload.from as string,
+        amount: BigInt(paymentPayload.value || expectedAmount),
+      };
+    } else {
+      // Debug: Try to recover signer address to verify signature correctness
+      try {
+        const auth = paymentPayload.payload?.authorization;
+        if (auth && paymentPayload.payload?.signature) {
+          // Normalize message (convert uint256 fields to bigint for correct recovery)
+          const normMsg = {
+            from: auth.from,
+            to: auth.to,
+            value: BigInt(auth.value),
+            validAfter: BigInt(auth.validAfter),
+            validBefore: BigInt(auth.validBefore),
+            nonce: auth.nonce as `0x${string}`,
+          };
+          
+          const usdcAddress = network === 'base-sepolia' 
+            ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+            : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+          
+          // CRITICAL: Base Sepolia USDC name is "USDC", not "USD Coin"
+          // Base Mainnet USDC name is "USD Coin"
+          const usdcName = network === 'base-sepolia' ? 'USDC' : 'USD Coin';
+          
+          const domain = {
+            name: usdcName,
+            version: '2',
+            chainId: chain.id,
+            verifyingContract: usdcAddress,
+          };
+          
+          const types = {
+            TransferWithAuthorization: [
+              { name: 'from', type: 'address' },
+              { name: 'to', type: 'address' },
+              { name: 'value', type: 'uint256' },
+              { name: 'validAfter', type: 'uint256' },
+              { name: 'validBefore', type: 'uint256' },
+              { name: 'nonce', type: 'bytes32' },
+            ],
+          };
+          
+          const recovered = await recoverTypedDataAddress({
+            domain,
+            types,
+            primaryType: 'TransferWithAuthorization',
+            message: normMsg,
+            signature: paymentPayload.payload.signature as `0x${string}`,
+          });
+          
+          console.log('🧪 Signature recovery test:');
+          console.log(`   Recovered address: ${recovered}`);
+          console.log(`   Expected address:  ${auth.from}`);
+          console.log(`   Match: ${recovered.toLowerCase() === auth.from.toLowerCase() ? '✅' : '❌'}`);
+        }
+      } catch (recoverError: any) {
+        console.log('🧪 Signature recovery failed:', recoverError.message);
+      }
+      
+      return { 
+        valid: false, 
+        error: verifyResult.invalidReason || "Payment verification failed" 
+      };
+    }
+  } catch (error: any) {
+    console.error("❌ x402 verification error:", error.message);
+    return { valid: false, error: error.message };
+  }
+}
+
+/**
+ * Settle x402 payment using facilitator
+ */
+async function settleX402Payment(
+  paymentHeader: string,
+  tokenAddress: string,
+  expectedAmount: bigint,
+  quantity: number,
+  req: any
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    console.log(`💰 Settling x402 payment...`);
+    
+    // Decode X-PAYMENT header to get PaymentPayload
+    const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
+    
+    // Calculate price (must match 402 response and verify)
+    const pricePerMint = Number(expectedAmount) / (1e6 * quantity);
+    const totalPrice = pricePerMint * quantity;
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    
+    // Generate payment requirements (MUST match 402 response and verify!)
+    const paymentRequirements = generatePaymentRequirements(
+      tokenAddress,
+      quantity,
+      totalPrice,
+      expectedAmount,
+      baseUrl
+    );
+    
+    console.log(`📋 Payment payload network:`, paymentPayload.network);
+    console.log(`📋 Payment requirements network:`, paymentRequirements.network);
+    console.log(`🔗 WalletClient chain:`, walletClient.chain?.id, walletClient.chain?.name);
+    console.log(`📋 Settling with payment requirements:`, JSON.stringify(paymentRequirements, null, 2));
+    console.log(`📋 Payment payload:`, JSON.stringify(paymentPayload, null, 2));
+    
+    // For testnet (base-sepolia), use x402.org facilitator
+    // For mainnet (base), use Coinbase facilitator (default)
+    const x402Config = network === 'base-sepolia' 
+      ? { facilitatorUrl: 'https://x402.org/facilitator' }
+      : {};
+    
+    // Use x402 settle function with combined client to execute on-chain payment
+    // combinedClient has both verifyTypedData (from publicClient) and signing (from walletClient)
+    try {
+      const settleResult = await settle(
+        combinedClient,
+        paymentPayload,
+        paymentRequirements,
+        x402Config
+      );
+      
+      console.log(`📊 Settle result:`, JSON.stringify(settleResult, null, 2));
+      
+      if (settleResult.success) {
+        return {
+          success: true,
+          txHash: settleResult.transaction,
+        };
+      } else {
+        return { 
+          success: false, 
+          error: settleResult.errorReason || "Payment settlement failed" 
+        };
+      }
+    } catch (settleError: any) {
+      console.error(`❌ Settle error:`, settleError);
+      console.error(`   Message:`, settleError.message);
+      console.error(`   Stack:`, settleError.stack);
+      return { success: false, error: settleError.message };
+    }
+  } catch (error: any) {
+    console.error("❌ x402 settlement error:", error.message);
+    return { success: false, error: error.message };
+  }
 }
 
 /**
@@ -806,9 +1071,13 @@ app.get("/api/tokens/:address", async (req, res) => {
 
 /**
  * POST /api/mint/:address - Mint tokens (with gasless support)
+ * Supports both x402 and traditional EIP-3009 payment methods
  */
 app.post("/api/mint/:address", async (req, res) => {
   console.log(`\n🎨 POST /api/mint/:address received`);
+  console.log(`   Token: ${req.params.address}`);
+  console.log(`   Headers:`, JSON.stringify(req.headers, null, 2));
+  console.log(`   Body:`, JSON.stringify(req.body, null, 2));
   
   try {
     const { address: tokenAddress } = req.params;
@@ -825,146 +1094,266 @@ app.post("/api/mint/:address", async (req, res) => {
     console.log(`📦 Batch mint quantity: ${quantity}`);
     
     // 🔒 SECURITY: Payment verification is REQUIRED
+    // Check payment method: x402 (X-PAYMENT header) or traditional (authorization body)
+    const paymentHeader = req.headers['x-payment'] as string | undefined;
     const authorization = req.body.authorization;
     
-    if (!authorization || !authorization.signature) {
+    console.log(`🔍 Payment check:`);
+    console.log(`   X-PAYMENT header: ${paymentHeader ? 'present' : 'missing'}`);
+    console.log(`   Authorization body: ${authorization ? 'present' : 'missing'}`);
+    
+    // Determine payment mode
+    const useX402 = !!paymentHeader && x402Enabled;
+    const useTraditional = !!authorization;
+    
+    // If no payment provided, return 402 Payment Required (x402 format)
+    if (!useX402 && !useTraditional) {
+      // Get token price for 402 response
+      let tokenPrice = "1 USDC";
+      if (pool) {
+        const dbToken = await getToken(pool, tokenAddress);
+        if (dbToken) {
+          tokenPrice = dbToken.price;
+        }
+      }
+      
+      const priceMatch = tokenPrice.match(/[\d.]+/);
+      const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 1;
+      const totalPrice = pricePerMint * quantity;
+      const totalPriceWei = BigInt(Math.floor(totalPrice * 1e6)); // USDC wei (6 decimals)
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      
+      // Generate payment requirements using shared function
+      const paymentRequirements = generatePaymentRequirements(
+        tokenAddress,
+        quantity,
+        totalPrice,
+        totalPriceWei,
+        baseUrl
+      );
+      
+      // x402-fetch expects this exact format:
+      // { x402Version: "1", accepts: [PaymentRequirements] }
+      const x402Response = {
+        x402Version: "1",
+        accepts: [paymentRequirements], // Array of payment options
+      };
+      
+      console.log(`💳 Returning 402 Payment Required (x402 format)`);
+      console.log(`   Amount: ${totalPrice} USDC (${totalPriceWei.toString()} wei)`);
+      console.log(`   Recipient: ${tokenAddress}`);
+      console.log(`   Resource URL: ${paymentRequirements.resource}`);
+      console.log(`   x402 Response:`, JSON.stringify(x402Response, null, 2));
+      
+      // Return 402 with x402 standard format
+      // Set x402 version header for client detection
+      res.setHeader('X-Payment-Required', 'x402');
+      res.setHeader('X-Payment-Version', '1');
+      return res.status(402).json(x402Response);
+    }
+    
+    // Validate traditional payment has signature
+    if (useTraditional && (!authorization || !authorization.signature)) {
       return res.status(400).json({
-        error: "Payment authorization required",
-        message: "Must provide EIP-3009 payment authorization to mint tokens",
+        error: "Invalid payment authorization",
+        message: "Traditional payment requires authorization with signature",
       });
     }
     
-    // Gasless mode with payment verification
-    console.log(`🆓 Gasless mint request with payment verification`);
-    const payer = authorization.from as `0x${string}`;
+    // Determine payer address and payment mode
+    let payer: `0x${string}`;
     let paymentTxHash: string | undefined;
+    let paymentMode: "x402" | "traditional";
     
-    // Get token info for payment token address
-    let paymentTokenAddress: `0x${string}`;
-    if (pool) {
-      const dbToken = await getToken(pool, tokenAddress);
-      if (dbToken) {
-        paymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
+    // Branch based on payment method
+    if (useX402) {
+      console.log(`🔐 x402 payment mode detected`);
+      paymentMode = "x402";
+      
+      // Get token price for x402 verification
+      let expectedPrice: bigint;
+      if (pool) {
+        const dbToken = await getToken(pool, tokenAddress);
+        if (dbToken) {
+          const priceMatch = dbToken.price.match(/[\d.]+/);
+          if (priceMatch) {
+            const priceInUSDC = parseFloat(priceMatch[0]);
+            expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)) * BigInt(quantity);
+          } else {
+            expectedPrice = BigInt(1e6) * BigInt(quantity); // Default 1 USDC per mint
+          }
+        } else {
+          expectedPrice = BigInt(1e6) * BigInt(quantity);
+        }
       } else {
-        // Fallback to USDC
+        expectedPrice = BigInt(1e6) * BigInt(quantity);
+      }
+      
+      // Decode payment header to get payer
+      const paymentPayload = JSON.parse(Buffer.from(paymentHeader!, 'base64').toString('utf-8'));
+      payer = paymentPayload.payload?.authorization?.from as `0x${string}`;
+      console.log(`📦 x402 payment from: ${payer}`);
+      
+      // First verify the payment
+      console.log(`🔍 Verifying x402 payment...`);
+      const verifyResult = await verifyX402Payment(paymentHeader!, tokenAddress, expectedPrice, quantity, req);
+      
+      if (!verifyResult.valid) {
+        return res.status(400).json({
+          error: "x402 payment verification failed",
+          message: verifyResult.error || "Payment signature or parameters invalid",
+        });
+      }
+      
+      console.log(`✅ x402 payment verified`);
+      
+      // Then settle x402 payment (on-chain settlement)
+      console.log(`💰 Settling x402 payment...`);
+      const settleResult = await settleX402Payment(paymentHeader!, tokenAddress, expectedPrice, quantity, req);
+      
+      if (!settleResult.success) {
+        return res.status(400).json({
+          error: "x402 payment settlement failed",
+          message: settleResult.error || "Failed to settle payment on-chain",
+        });
+      }
+      
+      paymentTxHash = settleResult.txHash;
+      console.log(`✅ x402 payment settled: ${paymentTxHash}`);
+      
+    } else {
+      // Traditional EIP-3009 mode
+      console.log(`🆓 Traditional gasless payment mode`);
+      paymentMode = "traditional";
+      payer = authorization.from as `0x${string}`;
+      
+      // Get token info for payment token address
+      let paymentTokenAddress: `0x${string}`;
+      if (pool) {
+        const dbToken = await getToken(pool, tokenAddress);
+        if (dbToken) {
+          paymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
+        } else {
+          // Fallback to USDC
+          paymentTokenAddress = network === 'base-sepolia' 
+            ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+            : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+        }
+      } else {
         paymentTokenAddress = network === 'base-sepolia' 
           ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
           : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
       }
-    } else {
-      paymentTokenAddress = network === 'base-sepolia' 
-        ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
-        : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
-    }
     
-    // Verify authorization is to the correct token contract address
-    if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
-      console.error(`❌ Invalid payment recipient: expected ${tokenAddress}, got ${authorization.to}`);
-      return res.status(400).json({
-        error: "Invalid payment recipient",
-        message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
-      });
-    }
-    
-    console.log(`✅ Payment recipient verified: ${tokenAddress}`);
-    
-    // 🔒 CRITICAL: Verify payment amount matches token price * quantity
-    let expectedPrice: bigint;
-    if (pool) {
-      const dbToken = await getToken(pool, tokenAddress);
-      if (!dbToken) {
-        return res.status(404).json({
-          error: "Token not found",
-          message: `Token ${tokenAddress} not found in database`,
+      // Verify authorization is to the correct token contract address
+      if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
+        console.error(`❌ Invalid payment recipient: expected ${tokenAddress}, got ${authorization.to}`);
+        return res.status(400).json({
+          error: "Invalid payment recipient",
+          message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
         });
       }
-      // Extract price from "1 USDC" format
-      const priceMatch = dbToken.price.match(/[\d.]+/);
-      if (!priceMatch) {
-        return res.status(500).json({
-          error: "Invalid token price",
-          message: "Token price format is invalid in database",
+      
+      console.log(`✅ Payment recipient verified: ${tokenAddress}`);
+    
+      // 🔒 CRITICAL: Verify payment amount matches token price * quantity
+      let expectedPrice: bigint;
+      if (pool) {
+        const dbToken = await getToken(pool, tokenAddress);
+        if (!dbToken) {
+          return res.status(404).json({
+            error: "Token not found",
+            message: `Token ${tokenAddress} not found in database`,
+          });
+        }
+        // Extract price from "1 USDC" format
+        const priceMatch = dbToken.price.match(/[\d.]+/);
+        if (!priceMatch) {
+          return res.status(500).json({
+            error: "Invalid token price",
+            message: "Token price format is invalid in database",
+          });
+        }
+        const priceInUSDC = parseFloat(priceMatch[0]);
+        expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)) * BigInt(quantity); // Convert to USDC wei (6 decimals) and multiply by quantity
+      } else {
+        return res.status(503).json({
+          error: "Database not configured",
+          message: "Cannot verify payment amount without database",
         });
       }
-      const priceInUSDC = parseFloat(priceMatch[0]);
-      expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)) * BigInt(quantity); // Convert to USDC wei (6 decimals) and multiply by quantity
-    } else {
-      return res.status(503).json({
-        error: "Database not configured",
-        message: "Cannot verify payment amount without database",
-      });
-    }
-    
-    const providedValue = BigInt(authorization.value);
-    if (providedValue !== expectedPrice) {
-      console.error(`❌ Invalid payment amount: expected ${expectedPrice}, got ${providedValue}`);
-      return res.status(400).json({
-        error: "Invalid payment amount",
-        message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei) for ${quantity}x mint, but got ${Number(providedValue) / 1e6} USDC`,
-        expected: expectedPrice.toString(),
-        provided: providedValue.toString(),
-      });
-    }
-    
-    console.log(`✅ Payment amount verified: ${Number(expectedPrice) / 1e6} USDC for ${quantity}x mint`);
-    
-    // Execute transferWithAuthorization (payment verification)
-    try {
-      const sig = authorization.signature.startsWith('0x') 
-        ? authorization.signature.slice(2) 
-        : authorization.signature;
       
-      const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
-      const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
-      let v = parseInt(sig.slice(128, 130), 16);
-      
-      if (v === 0 || v === 1) v = v + 27;
-      
-      // EIP-1559 省钱模式
-      const block = await publicClient.getBlock();
-      const baseFeePerGas = block.baseFeePerGas || 100000000n;
-      const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
-      const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
-      
-      const authHash = await walletClient.writeContract({
-        address: paymentTokenAddress,
-        abi: usdcAbi,
-        functionName: "transferWithAuthorization",
-        args: [
-          getAddress(authorization.from),
-          getAddress(authorization.to),
-          BigInt(authorization.value),
-          BigInt(authorization.validAfter),
-          BigInt(authorization.validBefore),
-          authorization.nonce as `0x${string}`,
-          v,
-          r,
-          s,
-        ],
-        gas: 150000n,
-        maxFeePerGas,
-        maxPriorityFeePerGas,
-      });
-      
-      console.log(`✅ USDC transfer executed: ${authHash}`);
-      
-      const authReceipt = await publicClient.waitForTransactionReceipt({ 
-        hash: authHash,
-        confirmations: 1,
-      });
-      
-      if (authReceipt.status !== "success") {
-        throw new Error("USDC transfer reverted");
+      const providedValue = BigInt(authorization.value);
+      if (providedValue !== expectedPrice) {
+        console.error(`❌ Invalid payment amount: expected ${expectedPrice}, got ${providedValue}`);
+        return res.status(400).json({
+          error: "Invalid payment amount",
+          message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei) for ${quantity}x mint, but got ${Number(providedValue) / 1e6} USDC`,
+          expected: expectedPrice.toString(),
+          provided: providedValue.toString(),
+        });
       }
       
-      paymentTxHash = authHash;
-    } catch (error: any) {
-      console.error("❌ transferWithAuthorization failed:", error.message);
-      return res.status(400).json({
-        error: "Payment verification failed",
-        message: error.message,
-      });
-    }
+      console.log(`✅ Payment amount verified: ${Number(expectedPrice) / 1e6} USDC for ${quantity}x mint`);
+    
+      // Execute transferWithAuthorization (payment verification)
+      try {
+        const sig = authorization.signature.startsWith('0x') 
+          ? authorization.signature.slice(2) 
+          : authorization.signature;
+        
+        const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
+        const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
+        let v = parseInt(sig.slice(128, 130), 16);
+        
+        if (v === 0 || v === 1) v = v + 27;
+        
+        // EIP-1559 省钱模式
+        const block = await publicClient.getBlock();
+        const baseFeePerGas = block.baseFeePerGas || 100000000n;
+        const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
+        const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
+        
+        const authHash = await walletClient.writeContract({
+          address: paymentTokenAddress,
+          abi: usdcAbi,
+          functionName: "transferWithAuthorization",
+          args: [
+            getAddress(authorization.from),
+            getAddress(authorization.to),
+            BigInt(authorization.value),
+            BigInt(authorization.validAfter),
+            BigInt(authorization.validBefore),
+            authorization.nonce as `0x${string}`,
+            v,
+            r,
+            s,
+          ],
+          gas: 150000n,
+          maxFeePerGas,
+          maxPriorityFeePerGas,
+        });
+        
+        console.log(`✅ USDC transfer executed: ${authHash}`);
+        
+        const authReceipt = await publicClient.waitForTransactionReceipt({ 
+          hash: authHash,
+          confirmations: 1,
+        });
+        
+        if (authReceipt.status !== "success") {
+          throw new Error("USDC transfer reverted");
+        }
+        
+        paymentTxHash = authHash;
+      } catch (error: any) {
+        console.error("❌ transferWithAuthorization failed:", error.message);
+        return res.status(400).json({
+          error: "Payment verification failed",
+          message: error.message,
+        });
+      }
+    } // End of traditional payment mode
 
     // Check remaining supply
     const [remainingSupply, mintAmountPerPayment] = await Promise.all([
@@ -1015,8 +1404,8 @@ app.post("/api/mint/:address", async (req, res) => {
         payer,
         txHashBytes32,
         i === 0 ? paymentTxHash : undefined, // Only attach payment tx to first mint
-        authorization,
-        "gasless",
+        useX402 ? { paymentHeader } : authorization, // Store payment data based on mode
+        paymentMode, // "x402" or "traditional"
         tokenAddress
       );
       
@@ -1037,17 +1426,36 @@ app.post("/api/mint/:address", async (req, res) => {
 
     const response: any = {
       success: true,
-      message: `Added ${queueIds.length}x mint${queueIds.length > 1 ? 's' : ''} to queue (gasless!)`,
+      message: `Added ${queueIds.length}x mint${queueIds.length > 1 ? 's' : ''} to queue (${paymentMode} payment)`,
       queueId: queueIds[0], // Return first queue ID for compatibility
       queueIds, // Return all queue IDs
       quantity: queueIds.length,
       payer,
+      paymentMode, // "x402" or "traditional"
       status: queueStatus.status,
       queuePosition: queueStatus.queue_position,
       estimatedWaitSeconds: queueStatus.queue_position * 10, // rough estimate
       amount: (mintAmountPerPayment * BigInt(queueIds.length)).toString(),
       paymentTxHash: paymentTxHash,
     };
+
+    // Add x402 payment confirmation header if using x402
+    if (useX402 && paymentTxHash) {
+      // Create payment receipt for x402 response header
+      const paymentReceipt = {
+        success: true,
+        transaction: paymentTxHash,
+        payer: payer,
+        amount: (mintAmountPerPayment * BigInt(queueIds.length)).toString(),
+        timestamp: Date.now(),
+      };
+      
+      // Encode receipt as base64 for X-PAYMENT-RESPONSE header
+      const receiptBase64 = Buffer.from(JSON.stringify(paymentReceipt)).toString('base64');
+      res.setHeader('X-PAYMENT-RESPONSE', receiptBase64);
+      
+      console.log(`✅ x402 payment confirmed, added X-PAYMENT-RESPONSE header`);
+    }
 
     return res.status(200).json(response);
   } catch (error: any) {
@@ -1167,6 +1575,7 @@ async function start() {
     console.log(`Database: ✅ Enabled`);
     console.log(`Redis Cache: ${redis ? '✅ Enabled' : '❌ Disabled'}`);
     console.log(`Queue System: ${queueConfigDisplay}`);
+    console.log(`x402 Protocol: ${x402Enabled ? `✅ Enabled (${x402FacilitatorUrl})` : '❌ Disabled'}`);
     console.log(`\n💡 LP Deployment: Run standalone service with 'npm run lp-deployer'`);
     console.log(`\nEndpoints:`);
     console.log(`  POST /api/deploy - Deploy new token`);
