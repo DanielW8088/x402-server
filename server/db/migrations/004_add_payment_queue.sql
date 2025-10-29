@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS payment_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   payment_type VARCHAR(10) NOT NULL CHECK (payment_type IN ('deploy', 'mint')),
   token_address VARCHAR(42), -- Token contract address (for mint payments)
-  authorization JSONB NOT NULL, -- EIP-3009 authorization data
+  "authorization" JSONB NOT NULL, -- EIP-3009 authorization data
   payer VARCHAR(42) NOT NULL,
   amount VARCHAR(100) NOT NULL, -- Payment amount in wei
   payment_token_address VARCHAR(42) NOT NULL, -- USDC/USDT address
@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS payment_queue (
 );
 
 -- Index for efficient queue processing
-CREATE INDEX IF NOT EXISTS idx_payment_queue_status_created 
-  ON payment_queue(status, created_at) 
+CREATE INDEX IF NOT EXISTS idx_payment_queue_status_created
+  ON payment_queue(status, created_at)
   WHERE status = 'pending';
 
 -- Index for payment status lookup
