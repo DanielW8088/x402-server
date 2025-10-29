@@ -2,7 +2,7 @@ import { config } from "dotenv";
 import express from "express";
 import cors from "cors";
 import { readFileSync } from "fs";
-import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, getAddress, keccak256, toHex } from "viem";
+import { createWalletClient, createPublicClient, http, parseAbi, parseUnits, formatUnits, getAddress, keccak256, toHex, isAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import { Pool } from "pg";
@@ -19,6 +19,38 @@ import { initDatabase } from "./db/init.js";
 import { MintQueueProcessor } from "./queue/processor.js";
 
 config();
+
+// Input validation constants
+const MAX_NAME_LENGTH = 100;
+const MAX_SYMBOL_LENGTH = 20;
+const MAX_DESCRIPTION_LENGTH = 1000;
+const MAX_URL_LENGTH = 500;
+
+/**
+ * Validate token name (alphanumeric, spaces, and basic punctuation)
+ */
+function isValidTokenName(name: string): boolean {
+  return /^[a-zA-Z0-9\s\-_.,!?()]+$/.test(name);
+}
+
+/**
+ * Validate token symbol (uppercase letters and numbers only)
+ */
+function isValidSymbol(symbol: string): boolean {
+  return /^[A-Z0-9]+$/.test(symbol);
+}
+
+/**
+ * Validate HTTP/HTTPS URL
+ */
+function isValidHttpUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 // Environment variables
 const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as `0x${string}`;
@@ -220,7 +252,9 @@ app.post("/api/deploy", async (req, res) => {
   try {
     const { name, symbol, mintAmount, maxMintCount, price, paymentToken, deployer, authorization, imageUrl, description } = req.body;
 
-    // Validation
+    // 🔒 SECURITY: Comprehensive input validation
+    
+    // Required fields
     if (!name || !symbol || !mintAmount || !maxMintCount || !price || !paymentToken || !deployer) {
       return res.status(400).json({
         error: "Missing required fields",
@@ -228,7 +262,7 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
 
-    // Validate authorization for deployment fee payment
+    // Payment authorization
     if (!authorization || !authorization.signature) {
       return res.status(400).json({
         error: "Missing payment authorization",
@@ -236,29 +270,100 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
 
-    // Validate minimum constraints
+    // Length validation
+    if (name.length > MAX_NAME_LENGTH) {
+      return res.status(400).json({
+        error: "Invalid name",
+        message: `Name must be ${MAX_NAME_LENGTH} characters or less (got ${name.length})`,
+      });
+    }
+
+    if (symbol.length > MAX_SYMBOL_LENGTH) {
+      return res.status(400).json({
+        error: "Invalid symbol",
+        message: `Symbol must be ${MAX_SYMBOL_LENGTH} characters or less (got ${symbol.length})`,
+      });
+    }
+
+    if (description && description.length > MAX_DESCRIPTION_LENGTH) {
+      return res.status(400).json({
+        error: "Invalid description",
+        message: `Description must be ${MAX_DESCRIPTION_LENGTH} characters or less (got ${description.length})`,
+      });
+    }
+
+    if (imageUrl && imageUrl.length > MAX_URL_LENGTH) {
+      return res.status(400).json({
+        error: "Invalid image URL",
+        message: `Image URL must be ${MAX_URL_LENGTH} characters or less (got ${imageUrl.length})`,
+      });
+    }
+
+    // Character validation
+    if (!isValidTokenName(name)) {
+      return res.status(400).json({
+        error: "Invalid name format",
+        message: "Name can only contain letters, numbers, spaces, and basic punctuation (.,!?-_())",
+      });
+    }
+
+    if (!isValidSymbol(symbol)) {
+      return res.status(400).json({
+        error: "Invalid symbol format",
+        message: "Symbol can only contain uppercase letters and numbers (e.g., TOKEN, ABC123)",
+      });
+    }
+
+    // Address validation
+    if (!isAddress(deployer)) {
+      return res.status(400).json({
+        error: "Invalid deployer address",
+        message: "Deployer must be a valid Ethereum address",
+      });
+    }
+
+    // URL validation
+    if (imageUrl && !isValidHttpUrl(imageUrl)) {
+      return res.status(400).json({
+        error: "Invalid image URL",
+        message: "Image URL must be a valid HTTP or HTTPS URL",
+      });
+    }
+
+    // Normalize deployer address
+    const normalizedDeployer = getAddress(deployer);
+
+    // Numeric constraints
     const mintAmountNum = parseFloat(mintAmount);
     const maxMintCountNum = parseInt(maxMintCount);
     const priceNum = parseFloat(price);
 
-    if (mintAmountNum < 1) {
+    if (isNaN(mintAmountNum) || mintAmountNum < 1) {
       return res.status(400).json({
         error: "Invalid mintAmount",
-        message: "mintAmount must be at least 1",
+        message: "mintAmount must be a number greater than or equal to 1",
       });
     }
 
-    if (maxMintCountNum < 10) {
+    if (isNaN(maxMintCountNum) || maxMintCountNum < 10) {
       return res.status(400).json({
         error: "Invalid maxMintCount",
-        message: "maxMintCount must be at least 10",
+        message: "maxMintCount must be an integer greater than or equal to 10",
       });
     }
 
-    if (priceNum < 1) {
+    if (isNaN(priceNum) || priceNum < 1) {
       return res.status(400).json({
         error: "Invalid price",
-        message: "price must be at least 1",
+        message: "price must be a number greater than or equal to 1",
+      });
+    }
+
+    // Payment token validation
+    if (paymentToken !== 'USDC' && paymentToken !== 'USDT') {
+      return res.status(400).json({
+        error: "Invalid payment token",
+        message: "paymentToken must be either 'USDC' or 'USDT'",
       });
     }
 
@@ -283,11 +388,11 @@ app.post("/api/deploy", async (req, res) => {
     
     console.log(`✅ Lock acquired! Proceeding with deployment...`);
     console.log(`\n🚀 Deploying new token: ${name} (${symbol})`);
-    console.log(`   Deployer: ${deployer}`);
+    console.log(`   Deployer: ${normalizedDeployer}`);
     console.log(`   Mint Amount: ${mintAmount} tokens`);
     console.log(`   Max Mints: ${maxMintCount}`);
     console.log(`   Price: ${price} ${paymentToken}`);
-    console.log(`   Excess Recipient: ${excessRecipient || deployer}`);
+    console.log(`   Excess Recipient: ${excessRecipient || normalizedDeployer}`);
     console.log(`   💡 USDC should be sent to the token contract address (will be shown after deployment)`);
 
     // Process deployment fee payment
@@ -381,7 +486,7 @@ app.post("/api/deploy", async (req, res) => {
       price: price.toString(),
       paymentToken: paymentToken === 'USDT' ? 'USDT' : 'USDC',
       network,
-      deployer,
+      deployer: normalizedDeployer,
       excessRecipient: excessRecipient, // Pass the excess recipient
       imageUrl: imageUrl || undefined,
       description: description || undefined,
@@ -424,7 +529,7 @@ app.post("/api/deploy", async (req, res) => {
           requiredUSDC: (Number(requiredUSDC) / 1e6).toFixed(2),
           totalUSDC: (Number(totalUSDC) / 1e6).toFixed(2),
           excessUSDC: (Number(excessUSDC) / 1e6).toFixed(2),
-          excessRecipient: excessRecipient || deployer,
+          excessRecipient: excessRecipient || normalizedDeployer,
         },
       },
     });
@@ -708,6 +813,16 @@ app.post("/api/mint/:address", async (req, res) => {
   try {
     const { address: tokenAddress } = req.params;
     const tokenContractAddress = tokenAddress as `0x${string}`;
+    const quantity = req.body.quantity || 1; // Support batch minting
+    
+    if (quantity < 1 || quantity > 10) {
+      return res.status(400).json({
+        error: "Invalid quantity",
+        message: "Quantity must be between 1 and 10",
+      });
+    }
+    
+    console.log(`📦 Batch mint quantity: ${quantity}`);
     
     // 🔒 SECURITY: Payment verification is REQUIRED
     const authorization = req.body.authorization;
@@ -753,7 +868,7 @@ app.post("/api/mint/:address", async (req, res) => {
     
     console.log(`✅ Payment recipient verified: ${tokenAddress}`);
     
-    // 🔒 CRITICAL: Verify payment amount matches token price
+    // 🔒 CRITICAL: Verify payment amount matches token price * quantity
     let expectedPrice: bigint;
     if (pool) {
       const dbToken = await getToken(pool, tokenAddress);
@@ -772,7 +887,7 @@ app.post("/api/mint/:address", async (req, res) => {
         });
       }
       const priceInUSDC = parseFloat(priceMatch[0]);
-      expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)); // Convert to USDC wei (6 decimals)
+      expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)) * BigInt(quantity); // Convert to USDC wei (6 decimals) and multiply by quantity
     } else {
       return res.status(503).json({
         error: "Database not configured",
@@ -785,13 +900,13 @@ app.post("/api/mint/:address", async (req, res) => {
       console.error(`❌ Invalid payment amount: expected ${expectedPrice}, got ${providedValue}`);
       return res.status(400).json({
         error: "Invalid payment amount",
-        message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei), but got ${Number(providedValue) / 1e6} USDC`,
+        message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei) for ${quantity}x mint, but got ${Number(providedValue) / 1e6} USDC`,
         expected: expectedPrice.toString(),
         provided: providedValue.toString(),
       });
     }
     
-    console.log(`✅ Payment amount verified: ${Number(expectedPrice) / 1e6} USDC`);
+    console.log(`✅ Payment amount verified: ${Number(expectedPrice) / 1e6} USDC for ${quantity}x mint`);
     
     // Execute transferWithAuthorization (payment verification)
     try {
@@ -851,26 +966,6 @@ app.post("/api/mint/:address", async (req, res) => {
       });
     }
 
-    // Generate unique transaction hash
-    const timestamp = Date.now();
-    const txHashBytes32 = generateMintTxHash(payer, timestamp, tokenAddress);
-
-    // Check if already minted on-chain
-    const alreadyMinted = await publicClient.readContract({
-      address: tokenContractAddress,
-      abi: tokenAbi,
-      functionName: "hasMinted",
-      args: [txHashBytes32],
-    });
-
-    if (alreadyMinted) {
-      return res.status(200).json({
-        success: true,
-        message: "Tokens already minted",
-        payer,
-      });
-    }
-
     // Check remaining supply
     const [remainingSupply, mintAmountPerPayment] = await Promise.all([
       publicClient.readContract({
@@ -885,38 +980,72 @@ app.post("/api/mint/:address", async (req, res) => {
       }),
     ]);
 
-    if (remainingSupply < mintAmountPerPayment) {
+    if (remainingSupply < mintAmountPerPayment * BigInt(quantity)) {
       return res.status(400).json({
-        error: "Maximum supply reached",
+        error: "Insufficient remaining supply",
+        message: `Only ${remainingSupply} tokens remaining, but ${quantity}x mint requires ${mintAmountPerPayment * BigInt(quantity)} tokens`,
       });
     }
 
-    console.log(`📥 Adding to queue: ${payer} for token ${tokenAddress.slice(0, 10)}...`);
+    console.log(`📥 Adding ${quantity}x mints to queue for ${payer} (token ${tokenAddress.slice(0, 10)}...)`);
 
-    // Add to queue instead of minting directly
-    const queueId = await queueProcessor.addToQueue(
-      payer,
-      txHashBytes32,
-      paymentTxHash,
-      authorization,
-      "gasless",
-      tokenAddress
-    );
+    // Add quantity mints to queue (each with unique txHash)
+    const queueIds: string[] = [];
+    const timestamp = Date.now();
+    
+    for (let i = 0; i < quantity; i++) {
+      // Generate unique transaction hash for each mint
+      const txHashBytes32 = generateMintTxHash(payer, timestamp + i, tokenAddress);
+      
+      // Check if already minted on-chain
+      const alreadyMinted = await publicClient.readContract({
+        address: tokenContractAddress,
+        abi: tokenAbi,
+        functionName: "hasMinted",
+        args: [txHashBytes32],
+      });
 
-    console.log(`✅ Added to queue: ${queueId}`);
+      if (alreadyMinted) {
+        console.log(`⏭️  Skipping mint ${i + 1}/${quantity} - already minted`);
+        continue;
+      }
 
-    // Get queue status
-    const queueStatus = await queueProcessor.getQueueStatus(queueId);
+      // Add to queue
+      const queueId = await queueProcessor.addToQueue(
+        payer,
+        txHashBytes32,
+        i === 0 ? paymentTxHash : undefined, // Only attach payment tx to first mint
+        authorization,
+        "gasless",
+        tokenAddress
+      );
+      
+      queueIds.push(queueId);
+      console.log(`✅ Added mint ${i + 1}/${quantity} to queue: ${queueId}`);
+    }
+
+    if (queueIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "All mints already completed",
+        payer,
+      });
+    }
+
+    // Get queue status for first mint
+    const queueStatus = await queueProcessor.getQueueStatus(queueIds[0]);
 
     const response: any = {
       success: true,
-      message: "Added to mint queue (gasless!)",
-      queueId,
+      message: `Added ${queueIds.length}x mint${queueIds.length > 1 ? 's' : ''} to queue (gasless!)`,
+      queueId: queueIds[0], // Return first queue ID for compatibility
+      queueIds, // Return all queue IDs
+      quantity: queueIds.length,
       payer,
       status: queueStatus.status,
       queuePosition: queueStatus.queue_position,
       estimatedWaitSeconds: queueStatus.queue_position * 10, // rough estimate
-      amount: mintAmountPerPayment.toString(),
+      amount: (mintAmountPerPayment * BigInt(queueIds.length)).toString(),
       paymentTxHash: paymentTxHash,
     };
 

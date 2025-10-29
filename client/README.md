@@ -43,104 +43,86 @@ cp env.x402.example .env
 NETWORK=base-sepolia              # 或 base
 PRIVATE_KEY=0x...                 # 你的私钥（仅用于签名）
 SERVER_URL=http://localhost:4021  # 服务端地址
+TOKEN_ADDRESS=0x...               # 要 mint 的代币合约地址
 ```
 
-> **注意**: 私钥只用于签名，不需要钱包里有 USDC 或 ETH！
+> **注意**: 
+> - 私钥只用于签名，不需要钱包里有 USDC 或 ETH！
+> - TOKEN_ADDRESS 从服务端的代币列表获取（访问 `GET /api/tokens`）
 
 ## 运行
 
-### 方式 1: 使用测试脚本（推荐）
+**重要**: 确保先设置 `TOKEN_ADDRESS` 环境变量！
 
 ```bash
-./test-x402.sh
-```
-
-选择实现：
-1. x402-axios (Axios 拦截器)
-2. x402-fetch (Fetch 包装器) - **默认**
-3. 手动实现 (需要 USDC)
-
-### 方式 2: 直接运行
-
-```bash
-# 默认 (x402-fetch)
+# 方式 1: x402 协议 (无需 USDC 和 gas)
 npm start
 
-# x402-fetch
-npm run start:fetch
+# 方式 2: 直接支付 USDC (需要 USDC 和 gas)
+npm run start:direct
 
-# x402-axios
-npm run start:axios
-
-# 手动实现 (需要 USDC)
-npm run start:manual
+# 或使用环境变量覆盖
+TOKEN_ADDRESS=0x... npm start
 ```
 
 ## 实现方式
 
-### 1. x402-fetch（默认，推荐）
+### 方式 1: x402 协议（推荐）
 
-**文件**: `index-x402-fetch.ts` (复制为 `index.ts`)
+**文件**: `index.ts`  
+**命令**: `npm start`
 
 **特性**:
-- ✅ 原生 fetch API
-- ✅ 轻量级，最小依赖
-- ✅ 自动处理 402 响应
-- ✅ 不需要 USDC 或 gas
+- ✅ 无需 USDC 余额
+- ✅ 无需 gas 费用
+- ✅ 快速 (~1秒)
+- ✅ 使用 EIP-712 签名
 
 **使用**:
 ```typescript
 import { wrapFetchWithPayment } from "x402-fetch";
 
-const walletClient = createWalletClient({...}).extend(publicActions);
 const fetchWithPayment = wrapFetchWithPayment(
   fetch, 
   walletClient as any,
-  BigInt(1_500_000) // Max 1.5 USDC
+  BigInt(1_500_000)
 );
 
-const response = await fetchWithPayment(`${serverUrl}/mint`, {
+const response = await fetchWithPayment(`${serverUrl}/api/mint/${tokenAddress}`, {
   method: "POST",
   body: JSON.stringify({ payer: account.address }),
 });
 ```
 
-### 2. x402-axios
+### 方式 2: 直接支付 USDC
 
-**文件**: `index-x402-standard.ts`
+**文件**: `index-direct-payment.ts`  
+**命令**: `npm run start:direct`
 
 **特性**:
-- ✅ Axios 拦截器
-- ✅ 完整的 HTTP 客户端功能
-- ✅ 自动处理 402 响应
-- ✅ 不需要 USDC 或 gas
+- ⚠️ 需要 USDC 余额
+- ⚠️ 需要 gas 费用 (ETH)
+- 🐢 较慢 (~5秒，等待确认)
+- ✅ 传统链上支付
 
 **使用**:
 ```typescript
-import { withPaymentInterceptor } from "x402-axios";
+// 1. 转账 USDC
+const hash = await walletClient.writeContract({
+  address: USDC_ADDRESS,
+  abi: usdcAbi,
+  functionName: "transfer",
+  args: [tokenAddress, amount],
+});
 
-const walletClient = createWalletClient({...}).extend(publicActions);
-const axiosWithPayment = withPaymentInterceptor(
-  axios.create(), 
-  walletClient as any
-);
-
-const response = await axiosWithPayment.post(`${serverUrl}/mint`, {
+// 2. 请求 mint
+const response = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
   payer: account.address,
+  paymentTxHash: hash,
 });
 ```
 
-### 3. 手动实现（参考）
-
-**文件**: `index-x402-working.ts`
-
-**特性**:
-- 完整控制整个流程
-- 实际发送 USDC 交易
-- ❌ 需要 USDC 余额
-- ❌ 需要 gas 费用
-
-**用途**: 学习 x402 协议原理，或需要实际转账的场景
+**详细文档**: 查看 [DIRECT_PAYMENT_GUIDE.md](./DIRECT_PAYMENT_GUIDE.md)
 
 ## 工作流程
 
@@ -165,26 +147,29 @@ x402 拦截/包装
 
 ## 对比
 
-| 特性 | x402 官方 | 手动实现 |
-|------|-----------|----------|
+| 特性 | x402 协议 | 直接支付 USDC |
+|------|-----------|---------------|
+| 命令 | `npm start` | `npm run start:direct` |
 | 需要 USDC | ❌ 不需要 | ✅ 需要 |
 | 需要 gas | ❌ 不需要 | ✅ 需要 |
-| 代码行数 | ~180 行 | ~315 行 |
-| 响应时间 | ~250ms | 5-20秒 |
-| 实现方式 | EIP-712签名 | USDC转账 |
+| 速度 | 快 (~1秒) | 慢 (~5秒) |
+| 成本 | $0 | Gas 费 (~$0.01-0.05) |
+| 链上交易 | 0 笔 | 1 笔 |
+| 实现方式 | EIP-712 签名 | USDC 转账 |
+| 适用场景 | 测试、开发 | 生产、传统流程 |
 
 ## 文件说明
 
 | 文件 | 说明 |
 |------|------|
-| `index.ts` | 默认入口（x402-fetch） |
-| `index-x402-fetch.ts` | x402-fetch 实现 ⭐ |
-| `index-x402-standard.ts` | x402-axios 实现 ⭐ |
-| `index-x402-working.ts` | 手动 USDC 转账实现（参考） |
-| `test-x402.sh` | 交互式测试脚本 |
-| `QUICK_START_X402.md` | 快速开始指南 |
-| `X402_COINBASE_GUIDE.md` | 完整使用文档 |
-| `X402_SUMMARY.md` | 实现总结 |
+| `index.ts` | x402 协议实现 (推荐) |
+| `index-direct-payment.ts` | 直接支付 USDC 实现 |
+| `package.json` | 依赖配置 |
+| `env.x402.example` | 环境变量模板 |
+| `README.md` | 完整文档 |
+| `USAGE.md` | 使用说明（包含 API 变更） ⭐ |
+| `DIRECT_PAYMENT_GUIDE.md` | 直接支付指南 ⭐ |
+| `QUICK_REFERENCE.md` | 快速参考 |
 
 ## 常见问题
 
@@ -196,12 +181,17 @@ x402 拦截/包装
 
 **A: 不需要！** 只签名，不上链。
 
-### Q: 如何选择实现？
+### Q: 需要 TOKEN_ADDRESS 了吗？
 
-**A:**
-- **x402-fetch**: 喜欢原生 API，追求轻量 ⭐
-- **x402-axios**: 已使用 axios，需要拦截器
-- **手动实现**: 学习协议原理，或需要实际转账
+**A: 是的！** Server 现在是多 token 系统，必须指定要 mint 的 token。从 `GET /api/tokens` 获取可用地址。详见 [USAGE.md](./USAGE.md)
+
+### Q: x402 和直接支付哪个好？
+
+**A:** 
+- **x402** (`npm start`): 测试、开发、无成本 ✅
+- **直接支付** (`npm run start:direct`): 需要链上记录、传统流程
+
+详见 [DIRECT_PAYMENT_GUIDE.md](./DIRECT_PAYMENT_GUIDE.md)
 
 ### Q: 出现 TypeScript 错误？
 

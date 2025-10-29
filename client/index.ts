@@ -11,10 +11,17 @@ config();
 const serverUrl = process.env.SERVER_URL || "http://localhost:4021";
 const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
 const network = (process.env.NETWORK || "base-sepolia") as "base-sepolia" | "base";
+const tokenAddress = process.env.TOKEN_ADDRESS as `0x${string}`;
 
 // Validation
 if (!privateKey) {
   console.error("❌ Missing PRIVATE_KEY in .env");
+  process.exit(1);
+}
+
+if (!tokenAddress) {
+  console.error("❌ Missing TOKEN_ADDRESS in .env");
+  console.error("💡 Set TOKEN_ADDRESS to the token contract you want to mint");
   process.exit(1);
 }
 
@@ -30,17 +37,14 @@ const walletClient = createWalletClient({
 }).extend(publicActions);
 
 /**
- * Get server info (free endpoint)
+ * Get token info (free endpoint)
  */
-async function getServerInfo() {
+async function getTokenInfo() {
   try {
-    const response = await axios.get(`${serverUrl}/info`);
+    const response = await axios.get(`${serverUrl}/api/tokens/${tokenAddress}`);
     return response.data;
   } catch (error: any) {
-    if (error.response?.status === 404) {
-      const healthResponse = await axios.get(`${serverUrl}/health`);
-      return healthResponse.data;
-    }
+    console.error(`❌ Failed to get token info for ${tokenAddress}`);
     throw error;
   }
 }
@@ -54,28 +58,33 @@ async function main() {
   console.log(`Network: ${network}`);
   console.log(`Your address: ${account.address}`);
   console.log(`Server: ${serverUrl}`);
+  console.log(`Token: ${tokenAddress}`);
   console.log(`Protocol: x402 (Coinbase Official)\n`);
 
   try {
-    // 1. Get server info
-    console.log("📋 Step 1: Getting server info...");
-    const serverInfo = await getServerInfo();
-    console.log(`   Protocol: ${serverInfo.protocol || 'unknown'}`);
-    console.log(`   Token contract: ${serverInfo.tokenContract}`);
-    console.log(`   Pay to address: ${serverInfo.payTo}`);
+    // 1. Get token info
+    console.log("📋 Step 1: Getting token info...");
+    const tokenInfo = await getTokenInfo();
+    console.log(`   Token: ${tokenInfo.name} (${tokenInfo.symbol})`);
+    console.log(`   Address: ${tokenInfo.address}`);
+    console.log(`   Payment to: ${tokenInfo.paymentAddress}`);
     
-    if (serverInfo.tokensPerPayment) {
-      const tokensPerPayment = formatUnits(BigInt(serverInfo.tokensPerPayment), 18);
-      console.log(`   Tokens per payment: ${tokensPerPayment}`);
+    if (tokenInfo.tokensPerMint) {
+      const tokensPerMint = formatUnits(BigInt(tokenInfo.tokensPerMint), 18);
+      console.log(`   Tokens per mint: ${tokensPerMint}`);
     }
     
-    if (serverInfo.remainingSupply) {
-      const remaining = formatUnits(BigInt(serverInfo.remainingSupply), 18);
+    if (tokenInfo.remainingSupply) {
+      const remaining = formatUnits(BigInt(tokenInfo.remainingSupply), 18);
       console.log(`   Remaining supply: ${remaining}`);
     }
     
-    if (serverInfo.price) {
-      console.log(`   Price: ${serverInfo.price}`);
+    if (tokenInfo.price) {
+      console.log(`   Price: ${tokenInfo.price}`);
+    }
+    
+    if (tokenInfo.mintProgress) {
+      console.log(`   Mint progress: ${tokenInfo.mintProgress}`);
     }
 
     // 2. Setup x402 fetch with automatic payment handling
@@ -98,8 +107,8 @@ async function main() {
     // 3. Verify payment amount is within allowed maximum
     // 4. Create payment proof using wallet client
     // 5. Retry with X-PAYMENT header
-    console.log(`   Sending request...`);
-    const response = await fetchWithPayment(`${serverUrl}/mint`, {
+    console.log(`   Sending mint request...`);
+    const response = await fetchWithPayment(`${serverUrl}/api/mint/${tokenAddress}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -123,13 +132,29 @@ async function main() {
     console.log(`\n${'='.repeat(50)}`);
     console.log("✨ SUCCESS! Tokens minted via x402!");
     console.log("====================================");
-    console.log(`Payer: ${mintResult.payer}`);
-    console.log(`Amount: ${formatUnits(BigInt(mintResult.amount), 18)} tokens`);
-    console.log(`Mint TX: ${mintResult.mintTxHash}`);
-    console.log(`Block: ${mintResult.blockNumber}`);
     
-    if (mintResult.timestamp) {
-      console.log(`Timestamp: ${new Date(mintResult.timestamp).toISOString()}`);
+    // Handle both immediate mints and queued mints
+    if (mintResult.queueId) {
+      // Queued response
+      console.log(`Queue ID: ${mintResult.queueId}`);
+      console.log(`Status: ${mintResult.status}`);
+      console.log(`Position: ${mintResult.position || 'N/A'}`);
+      console.log(`\n💡 Check status: ${serverUrl}/api/queue/${mintResult.queueId}`);
+    } else {
+      // Immediate mint response
+      console.log(`Payer: ${mintResult.payer}`);
+      if (mintResult.amount) {
+        console.log(`Amount: ${formatUnits(BigInt(mintResult.amount), 18)} tokens`);
+      }
+      if (mintResult.mintTxHash) {
+        console.log(`Mint TX: ${mintResult.mintTxHash}`);
+      }
+      if (mintResult.blockNumber) {
+        console.log(`Block: ${mintResult.blockNumber}`);
+      }
+      if (mintResult.timestamp) {
+        console.log(`Timestamp: ${new Date(mintResult.timestamp).toISOString()}`);
+      }
     }
     
     // Check for payment response header
@@ -146,12 +171,12 @@ async function main() {
     }
     
     console.log("\n💡 How x402-fetch worked:");
-    console.log("   1. Client requested /mint");
+    console.log(`   1. Client requested /api/mint/${tokenAddress}`);
     console.log("   2. x402-fetch detected 402 Payment Required");
     console.log("   3. x402-fetch parsed payment requirements");
     console.log("   4. x402-fetch created payment proof with wallet");
     console.log("   5. x402-fetch retried with X-PAYMENT header");
-    console.log("   6. Server verified and minted tokens!");
+    console.log("   6. Server verified and queued/minted tokens!");
     
     console.log("\n🎉 All done!");
 

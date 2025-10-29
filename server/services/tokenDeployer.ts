@@ -13,6 +13,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /**
+ * Escape string for safe use in JavaScript code
+ * Prevents code injection attacks
+ */
+function escapeJavaScriptString(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')  // Backslash
+    .replace(/"/g, '\\"')    // Double quote
+    .replace(/'/g, "\\'")    // Single quote
+    .replace(/\n/g, '\\n')   // Newline
+    .replace(/\r/g, '\\r')   // Carriage return
+    .replace(/\t/g, '\\t')   // Tab
+    .replace(/\$/g, '\\$')   // Dollar sign (template literals)
+    .replace(/`/g, '\\`');   // Backtick (template literals)
+}
+
+/**
  * Calculate square root of a BigInt using Newton's method
  */
 function sqrt(value: bigint): bigint {
@@ -178,8 +194,8 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
 const hre = require("hardhat");
 
 async function main() {
-    const TOKEN_NAME = "${config.name}";
-    const TOKEN_SYMBOL = "${config.symbol}";
+    const TOKEN_NAME = "${escapeJavaScriptString(config.name)}";
+    const TOKEN_SYMBOL = "${escapeJavaScriptString(config.symbol)}";
     const MINT_AMOUNT = "${mintAmountWei.toString()}";
     const MAX_MINT_COUNT = ${config.maxMintCount};
     

@@ -24,7 +24,7 @@ export class MintQueueProcessor {
   private tokenContractAddress: `0x${string}` | null;
   private isProcessing: boolean = false;
   private batchInterval: number = 10000; // 10 seconds
-  private maxBatchSize: number = 50;
+  private maxBatchSize: number = 500; // Increased from 50 to 500 to handle bulk mints
   private processorInterval: NodeJS.Timeout | null = null;
 
   constructor(
@@ -190,6 +190,7 @@ export class MintQueueProcessor {
 
   /**
    * Process a batch of pending mints
+   * Optimized to keep user's bulk mints together
    */
   async processBatch() {
     if (this.isProcessing) {
@@ -200,13 +201,27 @@ export class MintQueueProcessor {
     this.isProcessing = true;
 
     try {
-      // Get pending items
+      // Get pending items with smart selection
+      // Strategy: Get up to maxBatchSize items, but if we hit a user with multiple mints,
+      // include all their pending mints to keep them together
       const result = await this.pool.query(
-        `SELECT id, payer_address, tx_hash_bytes32, payment_type, token_address 
-         FROM mint_queue 
-         WHERE status = 'pending' 
-         ORDER BY created_at ASC 
-         LIMIT $1`,
+        `WITH batch_candidates AS (
+          SELECT id, payer_address, tx_hash_bytes32, payment_type, token_address, created_at,
+                 ROW_NUMBER() OVER (ORDER BY created_at ASC) as rn
+          FROM mint_queue 
+          WHERE status = 'pending'
+        ),
+        selected_payers AS (
+          SELECT DISTINCT payer_address, token_address
+          FROM batch_candidates
+          WHERE rn <= $1
+        )
+        SELECT bc.id, bc.payer_address, bc.tx_hash_bytes32, bc.payment_type, bc.token_address
+        FROM batch_candidates bc
+        INNER JOIN selected_payers sp 
+          ON bc.payer_address = sp.payer_address 
+          AND (bc.token_address = sp.token_address OR (bc.token_address IS NULL AND sp.token_address IS NULL))
+        ORDER BY bc.created_at ASC`,
         [this.maxBatchSize]
       );
 
@@ -216,6 +231,11 @@ export class MintQueueProcessor {
       }
 
       console.log(`\n📦 Processing batch of ${result.rows.length} mint(s)...`);
+      
+      // Log if we're processing more than maxBatchSize (due to grouping user mints)
+      if (result.rows.length > this.maxBatchSize) {
+        console.log(`   ℹ️  Extended batch to ${result.rows.length} items to keep user bulk mints together`);
+      }
 
       const items: QueueItem[] = result.rows;
 
@@ -230,6 +250,17 @@ export class MintQueueProcessor {
       }
 
       console.log(`   Grouped into ${itemsByToken.size} token(s)`);
+      
+      // Log user distribution
+      const userCounts = new Map<string, number>();
+      for (const item of items) {
+        const count = userCounts.get(item.payer_address) || 0;
+        userCounts.set(item.payer_address, count + 1);
+      }
+      const bulkUsers = Array.from(userCounts.entries()).filter(([_, count]) => count > 1);
+      if (bulkUsers.length > 0) {
+        console.log(`   👥 Bulk mints: ${bulkUsers.map(([addr, count]) => `${addr.slice(0, 8)}... (${count}x)`).join(', ')}`);
+      }
 
       // Process each token group
       for (const [tokenAddr, tokenItems] of itemsByToken.entries()) {
