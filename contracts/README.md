@@ -12,6 +12,9 @@ npx hardhat compile
 | Document | Description |
 |----------|-------------|
 | **[USAGE_GUIDE.md](./USAGE_GUIDE.md)** | 📖 **完整使用文档** - 所有合约功能和脚本使用方法 |
+| **[LAUNCHTOOL_DEPLOYMENT.md](./LAUNCHTOOL_DEPLOYMENT.md)** | 🔧 **LaunchTool部署指南** - 部署共享LP工具合约 |
+| **[LP_QUICK_START.md](./LP_QUICK_START.md)** | 🏊 **LP部署快速指南** - 5分钟完成流动性部署 |
+| **[LP_DEPLOYMENT_GUIDE.md](./LP_DEPLOYMENT_GUIDE.md)** | 📋 **LP部署详细文档** - 完整流程和故障排查 |
 | **[TOKENOMICS.md](./TOKENOMICS.md)** | 💰 代币经济学 - 20/80分配模型详解 |
 | **[contracts/X402Token.sol](./contracts/X402Token.sol)** | 📝 合约源代码 |
 
@@ -35,6 +38,14 @@ TOKEN_CONTRACT_ADDRESS=0x... USDC_AMOUNT=40000 \
 # 5. Grant minter role to server
 TOKEN_CONTRACT_ADDRESS=0x... SERVER_ADDRESS=0x... \
   npx hardhat run scripts/grantRole.js --network baseSepolia
+
+# 6. Deploy LaunchTool (do this ONCE for all tokens)
+# Your DEPLOYER_PRIVATE_KEY address will automatically become the admin
+npx hardhat run scripts/deployLaunchTool.js --network baseSepolia
+  
+# 7. After minting completes, deploy LP
+TOKEN_ADDRESS=0x... LAUNCH_TOOL_ADDRESS=0x... TARGET_PRICE_USDC=0.5 \
+  npx hardhat run scripts/deployFullLiquidityFlow.js --network baseSepolia
 ```
 
 ## 📊 Contract Features
@@ -97,7 +108,34 @@ TOKEN=0x... \
 ```bash
 # Check contract status
 TOKEN_ADDRESS=0x... npx hardhat run scripts/checkMinterRole.js --network base
+
+# Check token and LP status
+TOKEN_ADDRESS=0x... npx hardhat run scripts/checkTokenLpStatus.js --network base
 ```
+
+### LP Deployment
+
+**Step 1**: 部署 LaunchTool（所有 token 共享，只需做一次）
+
+```bash
+# Deploy LaunchTool (do this ONCE)
+# Your DEPLOYER_PRIVATE_KEY address will automatically become the admin
+npx hardhat run scripts/deployLaunchTool.js --network base
+```
+
+See **[LAUNCHTOOL_DEPLOYMENT.md](./LAUNCHTOOL_DEPLOYMENT.md)** for detailed guide.
+
+**Step 2**: 为每个 token 部署 LP
+
+```bash
+# Deploy LP for each token (after minting completes)
+TOKEN_ADDRESS=0x... \
+LAUNCH_TOOL_ADDRESS=0x... \
+TARGET_PRICE_USDC=0.5 \
+  npx hardhat run scripts/deployFullLiquidityFlow.js --network base
+```
+
+See **[LP_QUICK_START.md](./LP_QUICK_START.md)** for detailed LP deployment guide.
 
 ## 🏗️ Contract Configuration
 

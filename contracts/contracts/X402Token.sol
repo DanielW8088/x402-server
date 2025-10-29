@@ -506,13 +506,12 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
             }
 
             // Block transfers to contract if minting is completed (waiting for LP)
-            // Users cannot get refunds after minting completes
-            if (toIsContract && !isMint && !isBurn && !fromIsContract && mintingCompleted) {
+            // Exception: LP_DEPLOYER and owner can still transfer to contracts (needed for LaunchTool)
+            if (toIsContract && !isMint && !isBurn && !fromIsContract && mintingCompleted && !fromIsOwnerOrLP) {
                 revert TransfersLocked();
             }
 
             // Otherwise, only allow owner/LP deployer (plus mint/burn/contract-internal) to move tokens
-            // This catches all other transfers (including to contract if refund not processed above)
             if (
                 !isMint &&
                 !isBurn &&
