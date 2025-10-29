@@ -1,88 +1,223 @@
 #!/usr/bin/env node
 /**
- * Standalone LP Deployer Service
- * Monitors database for tokens ready for LP deployment and deploys them
+ * Standalone LP Deployer Service v2.0
+ * 
+ * Monitors database for tokens ready for LP deployment and deploys them using LaunchTool
+ * 
+ * Key Features:
+ * - Automatic setLaunchTool whitelist configuration
+ * - One-command LP deployment flow
+ * - Token decimals: 6 (aligned with USDC)
+ * - Initial LP ratio: 1 USDC = MINT_AMOUNT tokens
+ * 
+ * Requirements:
+ * - LaunchTool must be deployed on the target network
+ * - LAUNCH_TOOL_ADDRESS must be set in environment variables
+ * - LP_DEPLOYER wallet must have sufficient USDC
+ * 
  * Run independently from the main server
  */
 
 import { Pool } from "pg";
-import { createPublicClient, createWalletClient, http, parseAbi } from "viem";
+import { createPublicClient, createWalletClient, http, parseAbi, encodeFunctionData, formatUnits, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
+// ==================== Constants ====================
+
+const TOKEN_DECIMALS = 6; // X402Token uses 6 decimals (same as USDC)
+const USDC_DECIMALS = 6;
+
+const FEE_TIER = 10000; // 1% fee
+const TICK_SPACING = 200; // For 1% fee tier
+const TICK_RANGE_WIDTH = 100; // Multiplier for tick spacing
+
+const MIN_TICK = -887272;
+const MAX_TICK = 887272;
+
+// ==================== ABIs ====================
+
 const tokenAbi = parseAbi([
   "function mintCount() view returns (uint256)",
   "function maxMintCount() view returns (uint256)",
+  "function mintingCompleted() view returns (bool)",
   "function assetsTransferred() view returns (bool)",
+  "function lpLive() view returns (bool)",
   "function transferAssetsForLP() external",
+  "function confirmLpLive() external",
   "function balanceOf(address) view returns (uint256)",
+  "function approve(address spender, uint256 amount) external returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "function paymentToken() view returns (address)",
+  "function MINT_AMOUNT() view returns (uint256)",
+  "function poolSeedAmount() view returns (uint256)",
+  // LaunchTool whitelist
+  "function launchTool() view returns (address)",
+  "function setLaunchTool(address) external",
+  "function owner() view returns (address)",
 ]);
 
 const erc20Abi = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function approve(address spender, uint256 amount) external returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
   "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
 ]);
 
-const positionManagerAbi = parseAbi([
-  "function createAndInitializePoolIfNecessary(address token0, address token1, uint24 fee, uint160 sqrtPriceX96) external payable returns (address pool)",
-  "function mint((address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint256 amount0Desired, uint256 amount1Desired, uint256 amount0Min, uint256 amount1Min, address recipient, uint256 deadline)) external payable returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)",
-]);
-
-const poolAbi = parseAbi([
-  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+const launchToolAbi = parseAbi([
+  "function admin() view returns (address)",
+  "function configurePoolByAmount(address token0, address token1, uint256 amount0, uint256 amount1, uint160 sqrtPriceX96, int24 tickLower, int24 tickUpper, uint24 fee) external returns (uint256 positionId)",
+  "function withdrawToken(address token, uint256 amount) external",
 ]);
 
 const factoryAbi = parseAbi([
   "function getPool(address tokenA, address tokenB, uint24 fee) view returns (address pool)",
 ]);
 
-interface MintParams {
-  token0: `0x${string}`;
-  token1: `0x${string}`;
-  fee: number;
-  tickLower: number;
-  tickUpper: number;
-  amount0Desired: bigint;
-  amount1Desired: bigint;
-  amount0Min: bigint;
-  amount1Min: bigint;
-  recipient: `0x${string}`;
-  deadline: bigint;
+const poolAbi = parseAbi([
+  "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)",
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+]);
+
+// ==================== Helper Functions ====================
+
+/**
+ * Compute integer square root using Newton's method
+ */
+function sqrtBigInt(y: bigint): bigint {
+  if (y < 2n) return y;
+  let x0 = y / 2n;
+  let x1 = (x0 + y / x0) / 2n;
+  while (x1 < x0) {
+    [x0, x1] = [x1, (x1 + y / x1) / 2n];
+  }
+  return x0;
 }
+
+/**
+ * Calculate sqrtPriceX96 from human-readable price
+ * @param priceToken1PerToken0 - Price as token1/token0
+ * @param decimals0 - Decimals of token0
+ * @param decimals1 - Decimals of token1
+ */
+function calculateSqrtPriceX96(
+  priceToken1PerToken0: number,
+  decimals0: number,
+  decimals1: number
+): bigint {
+  // Convert price to high precision BigInt
+  const priceStr = priceToken1PerToken0.toFixed(18);
+  const priceParts = priceStr.split('.');
+  const integerPart = BigInt(priceParts[0]);
+  const decimalPart = priceParts[1] ? BigInt(priceParts[1].padEnd(18, '0')) : 0n;
+  const priceScaled = integerPart * (10n ** 18n) + decimalPart;
+
+  let priceRaw: bigint;
+  const exponent = decimals1 - 18 - decimals0;
+  if (exponent >= 0) {
+    const multiplier = 10n ** BigInt(exponent);
+    priceRaw = priceScaled * multiplier;
+  } else {
+    const divisor = 10n ** BigInt(-exponent);
+    priceRaw = priceScaled / divisor;
+  }
+
+  if (priceRaw <= 0n) {
+    throw new Error(`Invalid price calculation: priceRaw=${priceRaw}`);
+  }
+
+  const sqrtPrice = sqrtBigInt(priceRaw * (2n ** 192n));
+  return sqrtPrice;
+}
+
+/**
+ * Get tick at sqrt price
+ */
+function getTickAtSqrtRatio(sqrtPriceX96: bigint): number {
+  const Q96 = 2n ** 96n;
+  const sqrtPriceSquared = sqrtPriceX96 * sqrtPriceX96;
+  const Q192 = Q96 * Q96;
+  
+  const priceFloat = Number(sqrtPriceSquared) / Number(Q192);
+  const tick = Math.floor(Math.log(priceFloat) / Math.log(1.0001));
+  
+  return tick;
+}
+
+/**
+ * Floor tick to nearest valid tick based on tick spacing
+ */
+function floorToSpacing(tick: number, tickSpacing: number): number {
+  const remainder = tick % tickSpacing;
+  if (remainder === 0) return tick;
+  if (tick < 0) {
+    return tick - (tickSpacing + remainder);
+  }
+  return tick - remainder;
+}
+
+/**
+ * Wait for transaction confirmation
+ */
+async function waitForTransaction(
+  publicClient: any,
+  hash: `0x${string}`,
+  description: string,
+  confirmations: number = 2
+): Promise<any> {
+  console.log(`  📤 Tx: ${hash}`);
+  console.log(`  ⏳ Waiting for ${confirmations} confirmation(s)...`);
+  
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash,
+    confirmations,
+  });
+  
+  console.log(`  ✅ Confirmed in block ${receipt.blockNumber}`);
+  
+  // Additional delay for state propagation
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  
+  return receipt;
+}
+
+// ==================== Main Class ====================
 
 class StandaloneLPDeployer {
   private pool: Pool;
-  private adminWalletClient: any;
-  private lpWalletClient: any;
+  private walletClient: any;  // Single wallet for all operations
   private publicClient: any;
-  private positionManagerAddress: `0x${string}`;
+  private launchToolAddress: `0x${string}`;
   private factoryAddress: `0x${string}`;
   private checkInterval: number = 15000; // 15 seconds
   private monitorInterval: NodeJS.Timeout | null = null;
   private processingTokens: Set<string> = new Set();
   private isProcessing: boolean = false;
+  private network: string;
 
   constructor() {
     // Validate environment variables
     const missingVars: string[] = [];
     if (!process.env.DATABASE_URL) missingVars.push("DATABASE_URL");
-    if (!process.env.PRIVATE_KEY) missingVars.push("PRIVATE_KEY");
     if (!process.env.LP_DEPLOYER_PRIVATE_KEY) missingVars.push("LP_DEPLOYER_PRIVATE_KEY");
+    if (!process.env.LAUNCH_TOOL_ADDRESS) missingVars.push("LAUNCH_TOOL_ADDRESS");
 
     if (missingVars.length > 0) {
       console.error("\n❌ Missing required environment variables:");
       missingVars.forEach(v => console.error(`   - ${v}`));
       console.error("\n💡 To fix:");
       console.error("   1. Create .env file: cp env.multi-token.example .env");
-      console.error("   2. Set DATABASE_URL, PRIVATE_KEY, LP_DEPLOYER_PRIVATE_KEY");
-      console.error("\n📖 Example:");
-      console.error("   DATABASE_URL=postgresql://user:pass@localhost:5432/token_mint");
-      console.error("   PRIVATE_KEY=0x...");
-      console.error("   LP_DEPLOYER_PRIVATE_KEY=0x...\n");
+      console.error("   2. Set all required variables");
+      console.error("\n📖 Required:");
+      console.error("   DATABASE_URL=postgresql://...");
+      console.error("   LP_DEPLOYER_PRIVATE_KEY=0x...  (token owner, also used for LP deployment)");
+      console.error("   LAUNCH_TOOL_ADDRESS=0x...\n");
       throw new Error("Missing required environment variables");
     }
 
@@ -91,23 +226,22 @@ class StandaloneLPDeployer {
     this.pool = new Pool({
       connectionString: databaseUrl,
       ssl: databaseUrl?.includes('sslmode=require') ? {
-        rejectUnauthorized: false // For self-signed certificates
+        rejectUnauthorized: false
       } : false,
     });
 
     // Network config
-    const network = process.env.NETWORK || "baseSepolia";
-    const chain = network === "base" ? base : baseSepolia;
-    const rpcUrl = network === "base"
+    this.network = process.env.NETWORK || "baseSepolia";
+    const chain = this.network === "base" ? base : baseSepolia;
+    const rpcUrl = this.network === "base"
       ? (process.env.BASE_RPC_URL || "https://mainnet.base.org")
       : (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org");
 
-    // Position Manager and Factory addresses
-    this.positionManagerAddress = (network === "base"
-      ? "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1"
-      : "0x27F971cb582BF9E50F397e4d29a5C7A34f11faA2") as `0x${string}`;
+    // LaunchTool address from env
+    this.launchToolAddress = process.env.LAUNCH_TOOL_ADDRESS as `0x${string}`;
     
-    this.factoryAddress = (network === "base"
+    // Factory address
+    this.factoryAddress = (this.network === "base"
       ? "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
       : "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24") as `0x${string}`;
 
@@ -117,29 +251,25 @@ class StandaloneLPDeployer {
       transport: http(rpcUrl),
     });
 
-    // Admin wallet (for calling transferAssetsForLP)
-    const adminAccount = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
-    this.adminWalletClient = createWalletClient({
-      account: adminAccount,
+    // Single wallet for all operations (token owner + LP deployer)
+    const account = privateKeyToAccount(process.env.LP_DEPLOYER_PRIVATE_KEY as `0x${string}`);
+    this.walletClient = createWalletClient({
+      account,
       chain,
       transport: http(rpcUrl),
     });
 
-    // LP deployer wallet (for deploying LP)
-    const lpAccount = privateKeyToAccount(process.env.LP_DEPLOYER_PRIVATE_KEY as `0x${string}`);
-    this.lpWalletClient = createWalletClient({
-      account: lpAccount,
-      chain,
-      transport: http(rpcUrl),
-    });
-
-    console.log(`🔧 Standalone LP Deployer initialized`);
-    console.log(`   Network: ${network}`);
+    console.log(`╔════════════════════════════════════════════════════════════╗`);
+    console.log(`║          Standalone LP Deployer v2.0 Initialized         ║`);
+    console.log(`╚════════════════════════════════════════════════════════════╝`);
+    console.log(`\n🔧 Configuration:`);
+    console.log(`   Network: ${this.network}`);
     console.log(`   RPC: ${rpcUrl}`);
-    console.log(`   Admin: ${adminAccount.address}`);
-    console.log(`   LP Deployer: ${lpAccount.address}`);
-    console.log(`   Position Manager: ${this.positionManagerAddress}`);
+    console.log(`   Wallet: ${account.address}`);
+    console.log(`   LaunchTool: ${this.launchToolAddress}`);
     console.log(`   Factory: ${this.factoryAddress}`);
+    console.log(`   Token Decimals: ${TOKEN_DECIMALS}`);
+    console.log(`   Fee Tier: ${FEE_TIER / 10000}%`);
   }
 
   async start() {
@@ -168,6 +298,7 @@ class StandaloneLPDeployer {
     this.isProcessing = true;
 
     try {
+      // Query tokens that are ready for LP deployment
       const result = await this.pool.query(
         `SELECT address, name, symbol, max_mint_count, pool_fee, 
                 payment_token_address, payment_seed, pool_seed_amount, 
@@ -190,7 +321,7 @@ class StandaloneLPDeployer {
 
       if (result.rows.length === 0) return;
 
-      console.log(`\n🔍 Checking ${result.rows.length} token(s) for LP deployment readiness...`);
+      console.log(`\n🔍 Found ${result.rows.length} token(s) pending LP deployment...`);
 
       for (const token of result.rows) {
         try {
@@ -198,24 +329,16 @@ class StandaloneLPDeployer {
           const retryCount = token.lp_retry_count || 0;
 
           if (isRetry) {
-            console.log(`   🔄 Retrying ${token.symbol} (attempt ${retryCount + 1}/5)...`);
+            console.log(`\n🔄 Retrying ${token.symbol} (attempt ${retryCount + 1}/5)...`);
+          } else {
+            console.log(`\n🎯 Processing ${token.symbol}...`);
           }
-
-          // USDC for LP = payment_seed (direct from DB)
-          const usdcForLP = BigInt(token.payment_seed);
-          
-          // Token for LP = pool_seed_amount (direct from DB)
-          const tokenForLP = BigInt(token.pool_seed_amount);
           
           await this.processToken(
             token.address as `0x${string}`,
             token.name,
             token.symbol,
-            token.max_mint_count,
-            token.pool_fee || 3000,
             token.payment_token_address as `0x${string}`,
-            tokenForLP,
-            usdcForLP,
             isRetry,
             retryCount
           );
@@ -234,653 +357,552 @@ class StandaloneLPDeployer {
     tokenAddress: `0x${string}`,
     name: string,
     symbol: string,
-    maxMintCountDB: number,
-    poolFee: number,
     paymentTokenAddress: `0x${string}`,
-    tokenForLP: bigint,
-    usdcForLP: bigint,
     isRetry: boolean = false,
     retryCount: number = 0
   ) {
-    if (this.processingTokens.has(tokenAddress.toLowerCase())) {
+    const key = tokenAddress.toLowerCase();
+    if (this.processingTokens.has(key)) {
       console.log(`   ⏭️  ${symbol}: Already processing, skipping...`);
       return;
     }
 
+    this.processingTokens.add(key);
+
     try {
-      // Check if this is a new (Simple) contract
-      let assetsTransferred: boolean;
-      try {
-        assetsTransferred = await this.publicClient.readContract({
-          address: tokenAddress,
-          abi: tokenAbi,
-          functionName: "assetsTransferred",
-        }) as boolean;
-      } catch (e) {
-        console.log(`   ⏭️  ${symbol}: Old contract (no assetsTransferred function), skipping...`);
+      console.log(`\n╔════════════════════════════════════════════════════════════╗`);
+      console.log(`║  LP Deployment: ${symbol.padEnd(40)} ║`);
+      console.log(`╚════════════════════════════════════════════════════════════╝`);
+
+      // Step A: Pre-deployment checks
+      const isReady = await this.stepA_PreChecks(tokenAddress, symbol);
+      if (!isReady) {
+        // Not ready yet (minting incomplete or LP already live)
+        // Don't record as error, just skip and check again later
         return;
       }
 
-      const [mintCount, maxMintCount] = await Promise.all([
-        this.publicClient.readContract({
-          address: tokenAddress,
-          abi: tokenAbi,
-          functionName: "mintCount",
-        }),
-        this.publicClient.readContract({
-          address: tokenAddress,
-          abi: tokenAbi,
-          functionName: "maxMintCount",
-        }),
-      ]);
+      // Step A2: Set LaunchTool whitelist
+      await this.stepA2_SetLaunchTool(tokenAddress, symbol);
 
-      const mintProgress = Number(mintCount) / Number(maxMintCount) * 100;
-      console.log(`   📊 ${symbol}: ${mintCount}/${maxMintCount} mints (${mintProgress.toFixed(1)}%)`);
+      // Step A3: Transfer assets for LP (if needed)
+      await this.stepA3_TransferAssets(tokenAddress, symbol);
 
-      if (mintCount >= maxMintCount) {
-        if (!assetsTransferred) {
-          if (!isRetry) {
-            console.log(`\n🎉 ${symbol} is ready for asset transfer and LP deployment!`);
-          }
+      // Step B: Prepare LP deployer account
+      const deployerInfo = await this.stepB_PrepareDeployer(tokenAddress, paymentTokenAddress, symbol);
 
-          this.processingTokens.add(tokenAddress.toLowerCase());
+      // Step B3-6: Calculate pool parameters
+      const poolParams = await this.stepB_CalculateParams(
+              tokenAddress,
+              paymentTokenAddress,
+        deployerInfo.tokenBalance,
+        deployerInfo.mintAmount
+      );
 
-          try {
-            if (isRetry) {
+      // Step C: Create pool and add liquidity
+      await this.stepC_CreatePool(tokenAddress, poolParams, symbol);
+
+      // Step D: Confirm LP live
+      await this.stepD_ConfirmLpLive(tokenAddress, symbol);
+
+      // Step E: Verify deployment
+      await this.stepE_Verify(tokenAddress, poolParams, symbol);
+
+      // Update database
               await this.pool.query(
                 `UPDATE deployed_tokens 
-                 SET lp_deployment_error = NULL,
+         SET liquidity_deployed = true, 
+             liquidity_deployed_at = NOW(),
+             lp_deployment_error = NULL,
                      lp_deployment_error_at = NULL
                  WHERE address = $1`,
-                [tokenAddress.toLowerCase()]
-              );
-            }
+        [tokenAddress]
+      );
 
-            await this.transferAssetsAndDeployLP(
-              tokenAddress,
-              name,
-              symbol,
-              poolFee,
-              paymentTokenAddress,
-              tokenForLP,
-              usdcForLP,
-              retryCount
-            );
-          } finally {
-            this.processingTokens.delete(tokenAddress.toLowerCase());
-          }
-        } else {
-          console.log(`\n💰 ${symbol}: Assets already transferred, deploying LP only...`);
+      console.log(`\n╔════════════════════════════════════════════════════════════╗`);
+      console.log(`║              ✅ ${symbol} LP DEPLOYMENT COMPLETE!              ║`);
+      console.log(`╚════════════════════════════════════════════════════════════╝\n`);
 
-          this.processingTokens.add(tokenAddress.toLowerCase());
-
-          try {
-            if (isRetry) {
-              await this.pool.query(
-                `UPDATE deployed_tokens 
-                 SET lp_deployment_error = NULL,
-                     lp_deployment_error_at = NULL
-                 WHERE address = $1`,
-                [tokenAddress.toLowerCase()]
-              );
-            }
-
-            await this.deployLPOnly(
-              tokenAddress,
-              name,
-              symbol,
-              poolFee,
-              paymentTokenAddress,
-              tokenForLP,
-              usdcForLP,
-              retryCount
-            );
-          } finally {
-            this.processingTokens.delete(tokenAddress.toLowerCase());
-          }
-        }
-      }
     } catch (error: any) {
-      console.error(`   ❌ Failed to check ${symbol}:`, error.message);
+      console.error(`\n❌ LP deployment failed for ${symbol}:`, error.message);
+      
+      // Update database with error
+      await this.pool.query(
+        `UPDATE deployed_tokens 
+         SET lp_deployment_error = $1,
+             lp_deployment_error_at = NOW(),
+             lp_retry_count = COALESCE(lp_retry_count, 0) + 1
+         WHERE address = $2`,
+        [error.message.substring(0, 500), tokenAddress]
+            );
+          } finally {
+      this.processingTokens.delete(key);
     }
   }
 
-  private async transferAssetsAndDeployLP(
-    tokenAddress: `0x${string}`,
-    name: string,
-    symbol: string,
-    poolFee: number,
-    paymentTokenAddress: `0x${string}`,
-    tokenForLP: bigint,
-    usdcForLP: bigint,
-    retryCount: number = 0
-  ) {
-    try {
-      console.log(`\n💧 Deploying LP for ${symbol} (${tokenAddress})...`);
-      console.log(`   Pool config: fee=${poolFee} (${poolFee/10000}%)`);
+  // ==================== Deployment Steps ====================
 
-      // EIP-1559 省钱模式
-      const block = await this.publicClient.getBlock();
-      const baseFeePerGas = block.baseFeePerGas || 100000000n; // 0.1 gwei
-      const maxPriorityFeePerGas = 10000000n; // 0.01 gwei (LP 部署可以稍微快一点)
-      const maxFeePerGas = (baseFeePerGas * 120n) / 100n + maxPriorityFeePerGas; // 20% buffer
+  private async stepA_PreChecks(tokenAddress: `0x${string}`, symbol: string): Promise<boolean> {
+    console.log(`\n📋 Step A: Pre-deployment Checks`);
+    console.log(`${"=".repeat(60)}`);
 
-      console.log(`   💰 EIP-1559 Gas:`);
-      console.log(`      - Base Fee: ${Number(baseFeePerGas) / 1e9} gwei`);
-      console.log(`      - Max Fee: ${Number(maxFeePerGas) / 1e9} gwei`);
-
-      const lpDeployerAddress = this.lpWalletClient.account!.address;
-
-      // Step 1: Transfer assets
-      console.log(`   📍 Step 1: Transferring assets to LP deployer (${lpDeployerAddress})...`);
-
-      const transferHash = await this.adminWalletClient.writeContract({
+    // Check minting completed
+    const [mintingCompleted, mintCount, maxMintCount, assetsTransferred, lpLive] = await Promise.all([
+      this.publicClient.readContract({
         address: tokenAddress,
         abi: tokenAbi,
-        functionName: "transferAssetsForLP",
-        gas: 300000n,
-        maxFeePerGas,
-        maxPriorityFeePerGas,
-      } as any);
-
-      console.log(`   ⏳ Waiting for asset transfer: ${transferHash}`);
-      const transferReceipt = await this.publicClient.waitForTransactionReceipt({
-        hash: transferHash,
-        confirmations: 1,
-      });
-
-      if (transferReceipt.status !== "success") {
-        throw new Error(`Asset transfer failed: ${transferHash}`);
-      }
-
-      console.log(`   ✅ Assets transferred!`);
-      
-      // Wait for balances to update
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      // Check balances
-      const [tokenBalance, usdcBalance] = await Promise.all([
-        this.publicClient.readContract({
-          address: tokenAddress,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [lpDeployerAddress],
-        }),
-        this.publicClient.readContract({
-          address: paymentTokenAddress,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [lpDeployerAddress],
-        }),
-      ]);
-
-      console.log(`   💰 LP Deployer balances:`);
-      console.log(`      Token: ${tokenBalance.toString()}`);
-      console.log(`      USDC: ${usdcBalance.toString()}`);
-      console.log(`      Expected Token for LP: ${tokenForLP.toString()}`);
-      console.log(`      Expected USDC for LP: ${usdcForLP.toString()}`);
-
-      if (tokenBalance < tokenForLP) {
-        throw new Error(`Insufficient token balance: have ${tokenBalance}, need ${tokenForLP}`);
-      }
-
-      if (usdcBalance < usdcForLP) {
-        throw new Error(`Insufficient USDC balance: have ${usdcBalance}, need ${usdcForLP}`);
-      }
-
-      // Continue with LP deployment using the expected amounts
-      await this.deployLP(tokenAddress, name, symbol, poolFee, paymentTokenAddress, tokenForLP, usdcForLP, retryCount);
-
-    } catch (error: any) {
-      console.error(`\n❌ LP deployment failed for ${symbol}:`, error.message);
-
-      const newRetryCount = retryCount + 1;
-      const maxRetries = 5;
-
-      if (newRetryCount >= maxRetries) {
-        console.error(`   ⛔ Max retries (${maxRetries}) reached. Manual intervention required.`);
-      } else {
-        console.log(`   🔄 Will retry automatically (${newRetryCount}/${maxRetries})`);
-      }
-
-      await this.pool.query(
-        `UPDATE deployed_tokens 
-         SET lp_deployment_error = $1,
-             lp_deployment_error_at = NOW(),
-             lp_retry_count = $3
-         WHERE address = $2`,
-        [error.message, tokenAddress.toLowerCase(), newRetryCount]
-      );
-    }
-  }
-
-  private async deployLPOnly(
-    tokenAddress: `0x${string}`,
-    name: string,
-    symbol: string,
-    poolFee: number,
-    paymentTokenAddress: `0x${string}`,
-    tokenForLP: bigint,
-    usdcForLP: bigint,
-    retryCount: number = 0
-  ) {
-    try {
-      console.log(`\n💧 Deploying LP for ${symbol} (${tokenAddress})...`);
-      console.log(`   ℹ️  Assets already transferred, skipping transfer step`);
-      console.log(`   Pool config: fee=${poolFee} (${poolFee/10000}%)`);
-
-      const lpDeployerAddress = this.lpWalletClient.account!.address;
-
-      // Check balances
-      const [tokenBalance, usdcBalance] = await Promise.all([
-        this.publicClient.readContract({
-          address: tokenAddress,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [lpDeployerAddress],
-        }),
-        this.publicClient.readContract({
-          address: paymentTokenAddress,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [lpDeployerAddress],
-        }),
-      ]);
-
-      console.log(`   💰 LP Deployer balances:`);
-      console.log(`      Token: ${tokenBalance.toString()}`);
-      console.log(`      USDC: ${usdcBalance.toString()}`);
-      console.log(`      Expected Token for LP: ${tokenForLP.toString()}`);
-      console.log(`      Expected USDC for LP: ${usdcForLP.toString()}`);
-
-      if (tokenBalance < tokenForLP) {
-        throw new Error(`Insufficient token balance: have ${tokenBalance}, need ${tokenForLP}`);
-      }
-
-      if (usdcBalance < usdcForLP) {
-        throw new Error(`Insufficient USDC balance: have ${usdcBalance}, need ${usdcForLP}`);
-      }
-
-      await this.deployLP(tokenAddress, name, symbol, poolFee, paymentTokenAddress, tokenForLP, usdcForLP, retryCount);
-
-    } catch (error: any) {
-      console.error(`\n❌ LP deployment failed for ${symbol}:`, error.message);
-
-      const newRetryCount = retryCount + 1;
-      const maxRetries = 5;
-
-      if (newRetryCount >= maxRetries) {
-        console.error(`   ⛔ Max retries (${maxRetries}) reached. Manual intervention required.`);
-      } else {
-        console.log(`   🔄 Will retry automatically (${newRetryCount}/${maxRetries})`);
-      }
-
-      await this.pool.query(
-        `UPDATE deployed_tokens 
-         SET lp_deployment_error = $1,
-             lp_deployment_error_at = NOW(),
-             lp_retry_count = $3
-         WHERE address = $2`,
-        [error.message, tokenAddress.toLowerCase(), newRetryCount]
-      );
-    }
-  }
-
-  private async deployLP(
-    tokenAddress: `0x${string}`,
-    name: string,
-    symbol: string,
-    poolFee: number,
-    paymentTokenAddress: `0x${string}`,
-    tokenAmount: bigint,
-    usdcAmount: bigint,
-    retryCount: number
-  ) {
-    // EIP-1559 省钱模式
-    const block = await this.publicClient.getBlock();
-    const baseFeePerGas = block.baseFeePerGas || 100000000n; // 0.1 gwei
-    const maxPriorityFeePerGas = 10000000n; // 0.01 gwei
-    const maxFeePerGas = (baseFeePerGas * 120n) / 100n + maxPriorityFeePerGas;
-
-    console.log(`   💰 EIP-1559 Gas:`);
-    console.log(`      - Base Fee: ${Number(baseFeePerGas) / 1e9} gwei`);
-    console.log(`      - Max Fee: ${Number(maxFeePerGas) / 1e9} gwei`);
-
-    const lpDeployerAddress = this.lpWalletClient.account!.address;
-
-    // Step 1: Create and initialize pool
-    console.log(`   📍 Step 1: Creating/initializing Uniswap V3 pool...`);
-
-    const [token0, token1] = paymentTokenAddress < tokenAddress
-      ? [paymentTokenAddress, tokenAddress]
-      : [tokenAddress, paymentTokenAddress];
-
-    const [balance0, balance1] = paymentTokenAddress < tokenAddress
-      ? [usdcAmount, tokenAmount]
-      : [tokenAmount, usdcAmount];
-
-    // Read decimals for both tokens
-    console.log(`   🔍 Reading token decimals...`);
-    const [decimals0, decimals1] = await Promise.all([
+        functionName: "mintingCompleted",
+      }),
       this.publicClient.readContract({
-        address: token0,
-        abi: erc20Abi,
-        functionName: "decimals",
-      }) as Promise<number>,
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "mintCount",
+      }),
       this.publicClient.readContract({
-        address: token1,
-        abi: erc20Abi,
-        functionName: "decimals",
-      }) as Promise<number>,
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "maxMintCount",
+      }),
+      this.publicClient.readContract({
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "assetsTransferred",
+      }),
+      this.publicClient.readContract({
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "lpLive",
+      }),
     ]);
 
-    console.log(`      token0 (${token0}): ${decimals0} decimals`);
-    console.log(`      token1 (${token1}): ${decimals1} decimals`);
+    console.log(`  Minting Status:`);
+    console.log(`    - Completed: ${mintingCompleted}`);
+    console.log(`    - Count: ${mintCount} / ${maxMintCount}`);
+    console.log(`  Assets Transferred: ${assetsTransferred}`);
+    console.log(`  LP Live: ${lpLive}`);
 
-    // Calculate sqrtPriceX96 with decimal normalization
-    // price = (balance1/10^decimals1) / (balance0/10^decimals0)
-    //       = balance1 * 10^decimals0 / (balance0 * 10^decimals1)
-    // sqrtPriceX96 = sqrt(price) * 2^96
-    const Q96 = 2n ** 96n;
-    const MIN_SQRT_RATIO = 4295128739n;
-    const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
-
-    const scale0 = 10n ** BigInt(decimals0);
-    const scale1 = 10n ** BigInt(decimals1);
-
-    if (balance0 === 0n || balance1 === 0n) {
-      throw new Error(`Zero balance: balance0=${balance0}, balance1=${balance1}`);
+    if (!mintingCompleted) {
+      console.log(`  ⏳ Minting not completed yet, will check again later...`);
+      return false;
     }
 
-    // numerator = balance1 * 10^decimals0 * 2^192
-    // denominator = balance0 * 10^decimals1
-    const numerator = balance1 * scale0 * Q96 * Q96;
-    const denominator = balance0 * scale1;
-
-    let sqrtPriceX96 = this.sqrt(numerator / denominator);
-
-    // Clamp to valid range
-    if (sqrtPriceX96 <= MIN_SQRT_RATIO) {
-      console.log(`   ⚠️  sqrtPriceX96 ${sqrtPriceX96} too low, clamping to ${MIN_SQRT_RATIO + 1n}`);
-      sqrtPriceX96 = MIN_SQRT_RATIO + 1n;
-    }
-    if (sqrtPriceX96 >= MAX_SQRT_RATIO) {
-      console.log(`   ⚠️  sqrtPriceX96 ${sqrtPriceX96} too high, clamping to ${MAX_SQRT_RATIO - 1n}`);
-      sqrtPriceX96 = MAX_SQRT_RATIO - 1n;
+    if (lpLive) {
+      console.log(`  ⏭️  LP already live, skipping...`);
+      return false;
     }
 
-    console.log(`   💱 Price calculation (decimals-aware):`);
-    console.log(`      balance0: ${balance0.toString()}`);
-    console.log(`      balance1: ${balance1.toString()}`);
-    console.log(`      sqrtPriceX96: ${sqrtPriceX96.toString()}`);
+    console.log(`  ✅ All checks passed`);
+    return true;
+  }
 
-    // Check if pool already exists
+  private async stepA2_SetLaunchTool(tokenAddress: `0x${string}`, symbol: string) {
+    console.log(`\n🛠️  Step A2: Configure LaunchTool Whitelist`);
+    console.log(`${"=".repeat(60)}`);
+
+    const [currentLaunchTool, owner] = await Promise.all([
+        this.publicClient.readContract({
+          address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "launchTool",
+        }),
+        this.publicClient.readContract({
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "owner",
+        }),
+      ]);
+
+    console.log(`  Current LaunchTool: ${currentLaunchTool}`);
+    console.log(`  Target LaunchTool: ${this.launchToolAddress}`);
+    console.log(`  Token Owner: ${owner}`);
+    console.log(`  Wallet: ${this.walletClient.account.address}`);
+
+    // Check if already set correctly
+    if (currentLaunchTool.toLowerCase() === this.launchToolAddress.toLowerCase()) {
+      console.log(`  ✅ LaunchTool already set correctly, skipping...`);
+      return;
+    }
+
+    // Verify wallet is owner
+    if (owner.toLowerCase() !== this.walletClient.account.address.toLowerCase()) {
+      throw new Error(`Wallet is not the token owner`);
+    }
+
+    // Set LaunchTool
+    console.log(`  Setting LaunchTool...`);
+    const hash = await this.walletClient.writeContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "setLaunchTool",
+      args: [this.launchToolAddress],
+    });
+
+    await waitForTransaction(this.publicClient, hash, "setLaunchTool", 2);
+
+    // Verify
+    const newLaunchTool = await this.publicClient.readContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "launchTool",
+    });
+
+    if (newLaunchTool.toLowerCase() !== this.launchToolAddress.toLowerCase()) {
+      throw new Error("LaunchTool verification failed");
+    }
+
+    console.log(`  ✅ LaunchTool whitelist configured!`);
+  }
+
+  private async stepA3_TransferAssets(tokenAddress: `0x${string}`, symbol: string) {
+    console.log(`\n💸 Step A3: Transfer Assets for LP`);
+    console.log(`${"=".repeat(60)}`);
+
+    const assetsTransferred = await this.publicClient.readContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "assetsTransferred",
+    });
+
+    if (assetsTransferred) {
+      console.log(`  ✅ Assets already transferred, skipping...`);
+      return;
+    }
+
+    console.log(`  Calling transferAssetsForLP()...`);
+    const hash = await this.walletClient.writeContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "transferAssetsForLP",
+    });
+
+    await waitForTransaction(this.publicClient, hash, "transferAssetsForLP", 2);
+    console.log(`  ✅ Assets transferred!`);
+  }
+
+  private async stepB_PrepareDeployer(
+    tokenAddress: `0x${string}`,
+    paymentTokenAddress: `0x${string}`,
+    symbol: string
+  ) {
+    console.log(`\n🔧 Step B: Prepare LP Deployer Account`);
+    console.log(`${"=".repeat(60)}`);
+
+    const walletAddress = this.walletClient.account.address;
+
+    // Get balances and info
+    const [tokenBalance, usdcBalance, mintAmount] = await Promise.all([
+      this.publicClient.readContract({
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "balanceOf",
+        args: [walletAddress],
+      }),
+      this.publicClient.readContract({
+        address: paymentTokenAddress,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [walletAddress],
+      }),
+      this.publicClient.readContract({
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "MINT_AMOUNT",
+      }),
+    ]);
+
+    console.log(`  Wallet: ${walletAddress}`);
+    console.log(`  Balances:`);
+    console.log(`    - Token: ${formatUnits(tokenBalance, TOKEN_DECIMALS)} ${symbol}`);
+    console.log(`    - USDC: ${formatUnits(usdcBalance, USDC_DECIMALS)}`);
+    console.log(`  MINT_AMOUNT: ${formatUnits(mintAmount, TOKEN_DECIMALS)} ${symbol}`);
+
+    if (tokenBalance === 0n) {
+      throw new Error("Insufficient token balance");
+    }
+
+    // Approve tokens to LaunchTool
+    console.log(`\n  Approving tokens to LaunchTool...`);
+
+    // Check and approve token
+    const tokenAllowance = await this.publicClient.readContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "allowance",
+      args: [walletAddress, this.launchToolAddress],
+    });
+
+    if (tokenAllowance < tokenBalance) {
+      console.log(`    - Approving ${symbol}...`);
+      const hash = await this.walletClient.writeContract({
+        address: tokenAddress,
+        abi: tokenAbi,
+        functionName: "approve",
+        args: [this.launchToolAddress, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")],
+      });
+      await waitForTransaction(this.publicClient, hash, "Token approval", 2);
+    } else {
+      console.log(`    - ${symbol} already approved`);
+    }
+
+    // Check and approve USDC
+    const usdcAllowance = await this.publicClient.readContract({
+      address: paymentTokenAddress,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [walletAddress, this.launchToolAddress],
+    });
+
+    if (usdcAllowance < usdcBalance) {
+      console.log(`    - Approving USDC...`);
+      const hash = await this.walletClient.writeContract({
+        address: paymentTokenAddress,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [this.launchToolAddress, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")],
+      });
+      await waitForTransaction(this.publicClient, hash, "USDC approval", 2);
+    } else {
+      console.log(`    - USDC already approved`);
+    }
+
+    console.log(`  ✅ Approvals completed`);
+
+    return {
+      tokenBalance,
+      usdcBalance,
+      mintAmount,
+    };
+  }
+
+  private async stepB_CalculateParams(
+    tokenAddress: `0x${string}`,
+    paymentTokenAddress: `0x${string}`,
+    tokenBalance: bigint,
+    mintAmount: bigint
+  ) {
+    console.log(`\n🧮 Step B3-6: Calculate Pool Parameters`);
+    console.log(`${"=".repeat(60)}`);
+
+    // Target price: 1 USDC = MINT_AMOUNT tokens
+    // So: 1 token = (1 / MINT_AMOUNT) USDC
+    const mintAmountFloat = parseFloat(formatUnits(mintAmount, TOKEN_DECIMALS));
+    const pricePerToken = 1.0 / mintAmountFloat; // USDC per token
+
+    console.log(`  Target Price:`);
+    console.log(`    - 1 USDC = ${mintAmountFloat} tokens`);
+    console.log(`    - 1 token = ${pricePerToken.toFixed(6)} USDC`);
+
+    // Calculate required USDC based on token balance
+    const tokenAmountFloat = parseFloat(formatUnits(tokenBalance, TOKEN_DECIMALS));
+    const requiredUsdcFloat = tokenAmountFloat * pricePerToken;
+    const requiredUsdc = parseUnits(requiredUsdcFloat.toFixed(USDC_DECIMALS), USDC_DECIMALS);
+
+    console.log(`  Amount Calculation:`);
+    console.log(`    - Token amount: ${tokenAmountFloat.toFixed(6)}`);
+    console.log(`    - Required USDC: ${requiredUsdcFloat.toFixed(6)}`);
+
+    // Determine token0/token1 order
+    let token0: `0x${string}`, token1: `0x${string}`, amount0: bigint, amount1: bigint;
+    let decimals0: number, decimals1: number;
+
+    if (paymentTokenAddress.toLowerCase() < tokenAddress.toLowerCase()) {
+      token0 = paymentTokenAddress;
+      token1 = tokenAddress;
+      amount0 = requiredUsdc;
+      amount1 = tokenBalance;
+      decimals0 = USDC_DECIMALS;
+      decimals1 = TOKEN_DECIMALS;
+    } else {
+      token0 = tokenAddress;
+      token1 = paymentTokenAddress;
+      amount0 = tokenBalance;
+      amount1 = requiredUsdc;
+      decimals0 = TOKEN_DECIMALS;
+      decimals1 = USDC_DECIMALS;
+    }
+
+    console.log(`\n  Token Ordering:`);
+    console.log(`    - token0: ${token0} (${decimals0} decimals)`);
+    console.log(`    - token1: ${token1} (${decimals1} decimals)`);
+    console.log(`    - amount0: ${formatUnits(amount0, decimals0)}`);
+    console.log(`    - amount1: ${formatUnits(amount1, decimals1)}`);
+
+    // Calculate sqrtPriceX96
+    let priceToken1PerToken0: number;
+    if (token0.toLowerCase() === paymentTokenAddress.toLowerCase()) {
+      // token0 = USDC, token1 = Token
+      // price = token1/token0 = Token/USDC = 1/pricePerToken
+      priceToken1PerToken0 = 1.0 / pricePerToken;
+    } else {
+      // token0 = Token, token1 = USDC
+      // price = token1/token0 = USDC/Token = pricePerToken
+      priceToken1PerToken0 = pricePerToken;
+    }
+
+    console.log(`  Price Configuration:`);
+    console.log(`    - Calculated price (token1/token0): ${priceToken1PerToken0}`);
+
+    const sqrtPriceX96 = calculateSqrtPriceX96(priceToken1PerToken0, decimals0, decimals1);
+    console.log(`    - sqrtPriceX96: ${sqrtPriceX96.toString()}`);
+
+    // Calculate tick range
+    const currentTick = getTickAtSqrtRatio(sqrtPriceX96);
+    const tickWidth = TICK_RANGE_WIDTH * TICK_SPACING;
+
+    const tickLower = floorToSpacing(currentTick - tickWidth, TICK_SPACING);
+    const tickUpper = floorToSpacing(currentTick + tickWidth, TICK_SPACING);
+
+    console.log(`  Tick Range:`);
+    console.log(`    - Current Tick (approx): ${currentTick}`);
+    console.log(`    - Tick Width: ±${tickWidth}`);
+    console.log(`    - tickLower: ${tickLower}`);
+    console.log(`    - tickUpper: ${tickUpper}`);
+
+    // Validate tick range
+    if (tickLower < MIN_TICK || tickUpper > MAX_TICK) {
+      throw new Error(`Tick range out of bounds! MIN=${MIN_TICK}, MAX=${MAX_TICK}`);
+    }
+
+    return {
+      token0,
+      token1,
+      amount0,
+      amount1,
+      sqrtPriceX96,
+      tickLower,
+      tickUpper,
+      fee: FEE_TIER,
+    };
+  }
+
+  private async stepC_CreatePool(
+    tokenAddress: `0x${string}`,
+    poolParams: any,
+    symbol: string
+  ) {
+    console.log(`\n🏊 Step C: Create Pool and Add Liquidity`);
+    console.log(`${"=".repeat(60)}`);
+
+    console.log(`  Parameters:`);
+    console.log(`    - token0: ${poolParams.token0}`);
+    console.log(`    - token1: ${poolParams.token1}`);
+    console.log(`    - amount0: ${poolParams.amount0.toString()}`);
+    console.log(`    - amount1: ${poolParams.amount1.toString()}`);
+    console.log(`    - sqrtPriceX96: ${poolParams.sqrtPriceX96.toString()}`);
+    console.log(`    - tickLower: ${poolParams.tickLower}`);
+    console.log(`    - tickUpper: ${poolParams.tickUpper}`);
+    console.log(`    - fee: ${poolParams.fee}`);
+
+    console.log(`\n  Calling LaunchTool.configurePoolByAmount()...`);
+
+    const hash = await this.walletClient.writeContract({
+      address: this.launchToolAddress,
+      abi: launchToolAbi,
+      functionName: "configurePoolByAmount",
+      args: [
+        poolParams.token0,
+        poolParams.token1,
+        poolParams.amount0,
+        poolParams.amount1,
+        poolParams.sqrtPriceX96,
+        poolParams.tickLower,
+        poolParams.tickUpper,
+        poolParams.fee,
+      ],
+    });
+
+    await waitForTransaction(this.publicClient, hash, "configurePoolByAmount", 3);
+    console.log(`  ✅ Pool created and liquidity added!`);
+  }
+
+  private async stepD_ConfirmLpLive(tokenAddress: `0x${string}`, symbol: string) {
+    console.log(`\n✅ Step D: Confirm LP Live`);
+    console.log(`${"=".repeat(60)}`);
+
+    console.log(`  Calling confirmLpLive()...`);
+    const hash = await this.walletClient.writeContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "confirmLpLive",
+    });
+
+    await waitForTransaction(this.publicClient, hash, "confirmLpLive", 2);
+    console.log(`  ✅ LP confirmed live!`);
+  }
+
+  private async stepE_Verify(
+    tokenAddress: `0x${string}`,
+    poolParams: any,
+    symbol: string
+  ) {
+    console.log(`\n🔍 Step E: Verification`);
+    console.log(`${"=".repeat(60)}`);
+
+    // Verify pool exists
     const poolAddress = await this.publicClient.readContract({
       address: this.factoryAddress,
       abi: factoryAbi,
       functionName: "getPool",
-      args: [token0, token1, poolFee],
-    }) as `0x${string}`;
-
-    if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
-      console.log(`   ℹ️  Pool already exists at: ${poolAddress}`);
-      
-      // Read current price from pool
-      try {
-        const slot0 = await this.publicClient.readContract({
-          address: poolAddress,
-          abi: poolAbi,
-          functionName: "slot0",
-        }) as any;
-        
-        const currentSqrtPriceX96 = slot0[0];
-        console.log(`   📊 Current pool sqrtPriceX96: ${currentSqrtPriceX96.toString()}`);
-        console.log(`   📊 Desired pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
-        
-        const priceDiff = currentSqrtPriceX96 > sqrtPriceX96 
-          ? (currentSqrtPriceX96 * 100n) / sqrtPriceX96 - 100n
-          : (sqrtPriceX96 * 100n) / currentSqrtPriceX96 - 100n;
-        
-        if (priceDiff > 10n) {
-          console.log(`   ⚠️  WARNING: Pool price differs by ${priceDiff}% from desired price!`);
-          console.log(`   ⚠️  Pool was likely initialized with wrong decimals. Consider using different fee tier.`);
-        } else {
-          console.log(`   ✅ Pool price is within acceptable range (${priceDiff}% difference)`);
-        }
-      } catch (e) {
-        console.log(`   ⚠️  Could not read pool state:`, e);
-      }
-    } else {
-      console.log(`   ℹ️  Pool does not exist yet, will be created with correct price`);
-    }
-
-    try {
-      const poolHash = await this.lpWalletClient.writeContract({
-        address: this.positionManagerAddress,
-        abi: positionManagerAbi,
-        functionName: "createAndInitializePoolIfNecessary",
-        args: [token0, token1, poolFee, sqrtPriceX96],
-        gas: 500000n,
-        maxFeePerGas,
-        maxPriorityFeePerGas,
-      } as any);
-
-      await this.publicClient.waitForTransactionReceipt({
-        hash: poolHash,
-        confirmations: 1,
-      });
-      console.log(`   ✅ Pool ready: ${poolHash}`);
-      
-      // Wait before next transaction
-      await new Promise(resolve => setTimeout(resolve, 2000));
-    } catch (poolError: any) {
-      if (poolError.message.includes("Already initialized") ||
-          poolError.message.includes("AI") ||
-          poolError.message.toLowerCase().includes("initialized")) {
-        console.log(`   ℹ️  Pool already initialized (cannot change price)`);
-      } else {
-        console.log(`   ⚠️  Pool init warning: ${poolError.message}`);
-      }
-    }
-
-    // Step 2: Approve tokens
-    console.log(`   📍 Step 2: Approving tokens...`);
-
-    const [amount0, amount1] = paymentTokenAddress < tokenAddress
-      ? [usdcAmount, tokenAmount]
-      : [tokenAmount, usdcAmount];
-
-    // Approve token0 with explicit nonce
-    console.log(`   ⏳ Approving ${token0}...`);
-    const approve0Hash = await this.lpWalletClient.writeContract({
-      address: token0,
-      abi: erc20Abi,
-      functionName: "approve",
-      args: [this.positionManagerAddress, amount0],
-      gas: 100000n,
-      maxFeePerGas,
-      maxPriorityFeePerGas,
-    } as any);
-    const approve0Receipt = await this.publicClient.waitForTransactionReceipt({ 
-      hash: approve0Hash,
-      confirmations: 1 
-    });
-    console.log(`   ✅ Token0 approved (${approve0Hash})`);
-
-    // Wait a bit before next transaction to ensure nonce is updated
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Approve token1
-    console.log(`   ⏳ Approving ${token1}...`);
-    const approve1Hash = await this.lpWalletClient.writeContract({
-      address: token1,
-      abi: erc20Abi,
-      functionName: "approve",
-      args: [this.positionManagerAddress, amount1],
-      gas: 100000n,
-      maxFeePerGas,
-      maxPriorityFeePerGas,
-    } as any);
-    const approve1Receipt = await this.publicClient.waitForTransactionReceipt({ 
-      hash: approve1Hash,
-      confirmations: 1 
-    });
-    console.log(`   ✅ Token1 approved (${approve1Hash})`);
-
-    // Wait a bit before minting
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    console.log(`   ✅ All approvals complete`);
-
-    // Step 3: Mint LP position
-    console.log(`   📍 Step 3: Minting LP position...`);
-
-    // Calculate valid ticks based on fee tier
-    // Fee tier determines tick spacing:
-    // 500 (0.05%) => spacing 10
-    // 3000 (0.3%) => spacing 60
-    // 10000 (1%) => spacing 200
-    let tickSpacing: number;
-    if (poolFee === 500) {
-      tickSpacing = 10;
-    } else if (poolFee === 3000) {
-      tickSpacing = 60;
-    } else if (poolFee === 10000) {
-      tickSpacing = 200;
-    } else {
-      // Default to 60 for unknown fee tiers
-      tickSpacing = 60;
-    }
-
-    // Use maximum range, but ensure ticks are multiples of tickSpacing
-    // Uniswap V3 min/max ticks are -887272 and 887272
-    // For negative ticks, round UP (toward zero) to stay within range
-    // For positive ticks, round DOWN (toward zero) to stay within range
-    const MIN_TICK = -887272;
-    const MAX_TICK = 887272;
-    
-    const tickLower = Math.ceil(MIN_TICK / tickSpacing) * tickSpacing;
-    const tickUpper = Math.floor(MAX_TICK / tickSpacing) * tickSpacing;
-
-    console.log(`   🎯 Tick config: fee=${poolFee}, spacing=${tickSpacing}, range=[${tickLower}, ${tickUpper}]`);
-
-    const mintParams: MintParams = {
-      token0,
-      token1,
-      fee: poolFee,
-      tickLower,
-      tickUpper,
-      amount0Desired: amount0,
-      amount1Desired: amount1,
-      amount0Min: 0n,
-      amount1Min: 0n,
-      recipient: lpDeployerAddress,
-      deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
-    };
-
-    // First, simulate the transaction to catch any errors
-    console.log(`   🔍 Simulating mint transaction...`);
-    try {
-      await this.publicClient.simulateContract({
-        address: this.positionManagerAddress,
-        abi: positionManagerAbi,
-        functionName: "mint",
-        args: [mintParams],
-        account: this.lpWalletClient.account,
-      });
-      console.log(`   ✅ Simulation successful`);
-    } catch (simError: any) {
-      console.error(`   ❌ Simulation failed:`, simError);
-      throw new Error(`Mint simulation failed: ${simError.message || simError}`);
-    }
-
-    let mintHash: `0x${string}`;
-    try {
-      mintHash = await this.lpWalletClient.writeContract({
-        address: this.positionManagerAddress,
-        abi: positionManagerAbi,
-        functionName: "mint",
-        args: [mintParams],
-        gas: 1000000n,
-        maxFeePerGas,
-        maxPriorityFeePerGas,
-      } as any);
-
-      console.log(`   ⏳ Waiting for LP position mint: ${mintHash}`);
-    } catch (mintError: any) {
-      console.error(`   ❌ Mint transaction failed to submit:`, mintError);
-      throw new Error(`Failed to submit mint tx: ${mintError.message || mintError}`);
-    }
-
-    const mintReceipt = await this.publicClient.waitForTransactionReceipt({
-      hash: mintHash,
-      confirmations: 1,
+      args: [poolParams.token0, poolParams.token1, poolParams.fee],
     });
 
-    if (mintReceipt.status !== "success") {
-      // Try to get revert reason
-      console.error(`   ❌ Mint transaction reverted. Receipt:`, JSON.stringify(mintReceipt, null, 2));
-      throw new Error(`LP mint reverted: ${mintHash}. Check Base Sepolia explorer for details.`);
+    console.log(`  Pool Address: ${poolAddress}`);
+
+    if (poolAddress === "0x0000000000000000000000000000000000000000") {
+      throw new Error("Pool not found!");
     }
 
-    console.log(`   ✅ LP position minted successfully!`);
-    console.log(`   Block: ${mintReceipt.blockNumber}`);
-    console.log(`   Gas used: ${mintReceipt.gasUsed.toString()}`);
+    // Check pool state
+    const slot0 = await this.publicClient.readContract({
+      address: poolAddress,
+      abi: poolAbi,
+      functionName: "slot0",
+    });
 
-    // Update database
-    await this.pool.query(
-      `UPDATE deployed_tokens 
-       SET liquidity_deployed = true, 
-           liquidity_tx_hash = $1,
-           liquidity_deployed_at = NOW()
-       WHERE address = $2`,
-      [mintHash, tokenAddress.toLowerCase()]
-    );
+    console.log(`  Pool State:`);
+    console.log(`    - Current sqrtPriceX96: ${slot0[0].toString()}`);
+    console.log(`    - Current tick: ${slot0[1]}`);
+    console.log(`    - Expected sqrtPriceX96: ${poolParams.sqrtPriceX96.toString()}`);
 
-    console.log(`   ✅ Database updated`);
-    console.log(`\n🎊 LP deployment complete for ${symbol}!\n`);
-  }
+    // Check LP live status
+    const lpLive = await this.publicClient.readContract({
+      address: tokenAddress,
+      abi: tokenAbi,
+      functionName: "lpLive",
+    });
 
-  private sqrt(value: bigint): bigint {
-    if (value < 0n) {
-      throw new Error("Square root of negative numbers is not supported");
-    }
-    if (value < 2n) {
-      return value;
-    }
+    console.log(`  LP Live Status: ${lpLive}`);
 
-    let x0 = value;
-    let x1 = (value / 2n) + 1n;
-
-    while (x1 < x0) {
-      x0 = x1;
-      x1 = (x0 + value / x0) / 2n;
+    if (!lpLive) {
+      throw new Error("LP not marked as live");
     }
 
-    return x0;
+    const explorerBase = this.network === "base"
+      ? "https://basescan.org"
+      : "https://sepolia.basescan.org";
+
+    console.log(`\n  🔗 Links:`);
+    console.log(`    - Pool: ${explorerBase}/address/${poolAddress}`);
+    console.log(`    - Token: ${explorerBase}/address/${tokenAddress}`);
+
+    console.log(`  ✅ Verification completed!`);
   }
 }
 
-// Main
-async function main() {
-  console.log(`
-╔══════════════════════════════════════════════════╗
-║   Standalone LP Deployer Service                 ║
-║   Monitors and deploys liquidity pools           ║
-╚══════════════════════════════════════════════════╝
-`);
+// ==================== Main ====================
 
+async function main() {
   const deployer = new StandaloneLPDeployer();
 
   // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('\n\n🛑 Shutting down...');
+  process.on("SIGINT", () => {
+    console.log("\n\n🛑 Received SIGINT, shutting down gracefully...");
     deployer.stop();
     process.exit(0);
   });
 
-  process.on('SIGTERM', () => {
-    console.log('\n\n🛑 Shutting down...');
+  process.on("SIGTERM", () => {
+    console.log("\n\n🛑 Received SIGTERM, shutting down gracefully...");
     deployer.stop();
     process.exit(0);
   });
@@ -888,5 +910,7 @@ async function main() {
   await deployer.start();
 }
 
-main().catch(console.error);
-
+main().catch((error) => {
+  console.error("❌ Fatal error:", error);
+  process.exit(1);
+});

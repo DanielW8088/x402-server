@@ -1,15 +1,31 @@
 /**
  * Complete LP Deployment Flow for X402Token
  * 
+ * This script automatically handles the entire LP deployment process:
+ *   1. Pre-deployment checks (minting completed, LP not live, etc.)
+ *   2. Set LaunchTool whitelist (automatic, skips if already set)
+ *   3. Transfer assets for LP (if not already transferred)
+ *   4. Prepare LP deployer account (approve tokens)
+ *   5. Calculate pool parameters (price, ticks, amounts)
+ *   6. Create Uniswap V3 pool and add liquidity
+ *   7. Confirm LP live status
+ *   8. Verify deployment
+ *   9. Cleanup leftover balances
+ * 
  * Usage:
- *   npx hardhat run scripts/deployFullLiquidityFlow.js --network base
+ *   TOKEN_ADDRESS=0x... LAUNCH_TOOL_ADDRESS=0x... TARGET_PRICE_USDC=0.0001 \
+ *   npx hardhat run scripts/deployFullLiquidityFlow.js --network baseSepolia
  * 
  * Environment Variables Required:
  *   - TOKEN_ADDRESS: The X402Token contract address to deploy LP for
  *   - LAUNCH_TOOL_ADDRESS: The shared LaunchTool contract address
- *   - TARGET_PRICE_USDC: Target initial price in USDC (e.g., 0.5 means 1 token = 0.5 USDC)
- *   - FEE_TIER: Pool fee tier (500, 3000, or 10000)
- *   - TICK_RANGE_WIDTH: Optional tick range width multiplier (default: 100)
+ *   - TARGET_PRICE_USDC: Target initial price in USDC (e.g., 0.0001 means 1 token = 0.0001 USDC)
+ * 
+ * Environment Variables Optional:
+ *   - FEE_TIER: Pool fee tier - 500, 3000, or 10000 (default: 10000 = 1%)
+ *   - TICK_RANGE_WIDTH: Tick range width multiplier (default: 100)
+ * 
+ * Note: The signer must be the token owner and have sufficient USDC balance.
  */
 
 const hre = require("hardhat");
@@ -76,6 +92,9 @@ const X402_TOKEN_ABI = [
     "function balanceOf(address) view returns (uint256)",
     "function approve(address spender, uint256 value) returns (bool)",
     "function allowance(address owner, address spender) view returns (uint256)",
+    "function launchTool() view returns (address)",
+    "function setLaunchTool(address) external",
+    "function owner() view returns (address)",
 ];
 
 const ERC20_ABI = [
@@ -293,7 +312,57 @@ async function stepA_PreChecks(tokenContract, signer) {
         lpDeployer,
         tokenDecimals,
         signerAddress,
+        lpLive,
     };
+}
+
+/**
+ * Step A2: Set LaunchTool whitelist
+ */
+async function stepA2_SetLaunchTool(tokenContract, launchToolAddress, info) {
+    console.log("\n🛠️  Step A2: Configure LaunchTool Whitelist");
+    console.log("=".repeat(60));
+
+    // Check current launchTool setting
+    const currentLaunchTool = await tokenContract.launchTool();
+    const owner = await tokenContract.owner();
+
+    console.log(`  Current State:`);
+    console.log(`    - Token Owner: ${owner}`);
+    console.log(`    - Current LaunchTool: ${currentLaunchTool}`);
+    console.log(`    - Target LaunchTool: ${launchToolAddress}`);
+    console.log(`    - LP Live: ${info.lpLive}`);
+
+    // Check if signer is owner
+    if (info.signerAddress.toLowerCase() !== owner.toLowerCase()) {
+        throw new Error(`❌ Signer ${info.signerAddress} is not the owner ${owner}!`);
+    }
+
+    // Check if launchTool is already set correctly
+    if (currentLaunchTool.toLowerCase() === launchToolAddress.toLowerCase()) {
+        console.log(`  ✓ LaunchTool already set correctly, skipping...`);
+        return;
+    }
+
+    // Check if LP is already live (cannot change launchTool after LP is live)
+    if (info.lpLive) {
+        throw new Error("❌ LP is already live! Cannot change LaunchTool.");
+    }
+
+    // Set LaunchTool
+    console.log(`\n  Setting LaunchTool to ${launchToolAddress}...`);
+    const tx = await tokenContract.setLaunchTool(launchToolAddress);
+    await waitForTransaction(tx, "setLaunchTool", 2);
+
+    // Verify
+    const newLaunchTool = await tokenContract.launchTool();
+    console.log(`  ✅ LaunchTool updated: ${newLaunchTool}`);
+
+    if (newLaunchTool.toLowerCase() !== launchToolAddress.toLowerCase()) {
+        throw new Error("❌ LaunchTool verification failed!");
+    }
+
+    console.log(`  🎉 LaunchTool is now whitelisted for token transfers!`);
 }
 
 /**
@@ -765,6 +834,11 @@ async function main() {
     try {
         // Execute flow
         const info = await stepA_PreChecks(tokenContract, signer);
+
+        await waitBetweenSteps("Set LaunchTool");
+        await stepA2_SetLaunchTool(tokenContract, CONFIG.LAUNCH_TOOL_ADDRESS, info);
+
+        await waitBetweenSteps("Transfer assets");
         await stepA3_TransferAssets(tokenContract, info);
 
         // Refresh info after transfer

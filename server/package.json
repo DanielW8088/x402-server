@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "tsx watch index-multi-token.ts",
     "dev:queue": "tsx watch index-queue.ts",
-    "lp-deployer": "tsx lp-deployer-standalone.ts",
-    "lp-deployer:watch": "tsx watch lp-deployer-standalone.ts",
+    "dev:lp-deployer": "tsx watch lp-deployer-standalone.ts",
+    "start:lp-deployer": "tsx lp-deployer-standalone.ts",
     "start": "tsx index-multi-token.ts",
     "start:queue": "tsx index-queue.ts",
     "build": "tsc",
