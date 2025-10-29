@@ -193,6 +193,7 @@ const tokenAbi = parseAbi([
   "function mintCount() view returns (uint256)",
   "function maxMintCount() view returns (uint256)",
   "function liquidityDeployed() view returns (bool)",
+  "function balanceOf(address account) view returns (uint256)",
   "function MINTER_ROLE() view returns (bytes32)",
   "function hasRole(bytes32 role, address account) view returns (bool)",
   "event TokensMinted(address indexed to, uint256 amount, bytes32 txHash)",
@@ -227,7 +228,8 @@ app.use(express.json());
 const queueProcessor = new MintQueueProcessor(
   pool,
   minterWalletClient,  // Use MINTER wallet, not SERVER wallet
-  publicClient
+  publicClient,
+  minterAccount        // Account for nonce management
 );
 
 // Initialize payment queue processor for serial payment processing

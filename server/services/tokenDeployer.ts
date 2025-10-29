@@ -119,7 +119,18 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
   const lpDeployerAddress = lpAccount.address;
 
+  // Get minter private key for granting MINTER_ROLE
+  const minterPrivateKey = process.env.MINTER_PRIVATE_KEY as string;
+  if (!minterPrivateKey) {
+    throw new Error('MINTER_PRIVATE_KEY environment variable required');
+  }
+  
+  // Derive minter address from private key
+  const minterAccount = privateKeyToAccount(minterPrivateKey as `0x${string}`);
+  const minterAddress = minterAccount.address;
+
   console.log(`💼 LP Deployer: ${lpDeployerAddress}`);
+  console.log(`🔐 Minter Address: ${minterAddress}`);
 
   // Calculate amounts
   // Total supply calculation:
@@ -167,18 +178,6 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   console.log(`   sqrtPricePaymentFirst: ${sqrtPricePaymentFirst}`);
   console.log(`   sqrtPriceTokenFirst: ${sqrtPriceTokenFirst}`);
 
-  // Get server private key for granting MINTER_ROLE
-  const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as string;
-  if (!serverPrivateKey) {
-    throw new Error('SERVER_PRIVATE_KEY environment variable required');
-  }
-  
-  // Derive server address from private key
-  const serverAccount = privateKeyToAccount(serverPrivateKey as `0x${string}`);
-  const serverAddress = serverAccount.address;
-  
-  console.log(`🔐 Server address (will be granted MINTER_ROLE): ${serverAddress}`);
-
   // Generate deployment script (Simplified)
   // Use CONTRACTS_DIR env var if set, otherwise use relative path
   const contractsDir = process.env.CONTRACTS_DIR || join(__dirname, '../../../contracts');
@@ -204,11 +203,11 @@ async function main() {
     const POOL_SEED_AMOUNT = "${poolSeedAmount.toString()}";
     const EXCESS_RECIPIENT = "${excessRecipient}";
     const LP_DEPLOYER = "${lpDeployerAddress}";
-    const SERVER_ADDRESS = "${serverAddress}";
+    const MINTER_ADDRESS = "${minterAddress}";
 
     console.log("Deploying X402Token:", TOKEN_NAME);
     console.log("LP Deployer:", LP_DEPLOYER);
-    console.log("Server Address:", SERVER_ADDRESS);
+    console.log("Minter Address:", MINTER_ADDRESS);
     
     const X402Token = await hre.ethers.getContractFactory("X402Token");
     const token = await X402Token.deploy(
@@ -232,16 +231,16 @@ async function main() {
     const receipt = await token.deploymentTransaction().wait(3);
     console.log("Deployment confirmed in block:", receipt.blockNumber);
     
-    // Grant MINTER_ROLE to server address
-    console.log("\\n🔐 Granting MINTER_ROLE to server...");
+    // Grant MINTER_ROLE to minter address (not server address)
+    console.log("\\n🔐 Granting MINTER_ROLE to minter address...");
     const MINTER_ROLE = await token.MINTER_ROLE();
     
     // Check if already has role
-    const hasRole = await token.hasRole(MINTER_ROLE, SERVER_ADDRESS);
+    const hasRole = await token.hasRole(MINTER_ROLE, MINTER_ADDRESS);
     if (hasRole) {
-        console.log("✅ Server already has MINTER_ROLE");
+        console.log("✅ Minter already has MINTER_ROLE");
     } else {
-        const grantTx = await token.grantRole(MINTER_ROLE, SERVER_ADDRESS);
+        const grantTx = await token.grantRole(MINTER_ROLE, MINTER_ADDRESS);
         console.log("Grant role tx:", grantTx.hash);
         console.log("⏳ Waiting for confirmation...");
         await grantTx.wait(2); // Wait for 2 confirmations
@@ -252,7 +251,7 @@ async function main() {
     console.log("🔍 Verifying role...");
     let hasRoleAfter = false;
     for (let i = 0; i < 3; i++) {
-        hasRoleAfter = await token.hasRole(MINTER_ROLE, SERVER_ADDRESS);
+        hasRoleAfter = await token.hasRole(MINTER_ROLE, MINTER_ADDRESS);
         if (hasRoleAfter) {
             console.log("✅ MINTER_ROLE verified successfully");
             break;

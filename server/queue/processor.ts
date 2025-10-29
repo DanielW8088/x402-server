@@ -1,5 +1,6 @@
 import { Pool } from "pg";
-import { WalletClient, PublicClient, parseAbi } from "viem";
+import { WalletClient, PublicClient, parseAbi, Account } from "viem";
+import { NonceManager } from "./nonce-manager.js";
 
 const tokenAbi = parseAbi([
   "function mint(address to, bytes32 txHash) external",
@@ -21,6 +22,8 @@ export class MintQueueProcessor {
   private pool: Pool;
   private walletClient: WalletClient;
   private publicClient: PublicClient;
+  private account: Account;
+  private nonceManager: NonceManager;
   private tokenContractAddress: `0x${string}` | null;
   private isProcessing: boolean = false;
   private batchInterval: number = 10000; // 10 seconds
@@ -31,19 +34,28 @@ export class MintQueueProcessor {
     pool: Pool,
     walletClient: WalletClient,
     publicClient: PublicClient,
+    account: Account,
     tokenContractAddress?: `0x${string}`
   ) {
     this.pool = pool;
     this.walletClient = walletClient;
     this.publicClient = publicClient;
+    this.account = account;
     this.tokenContractAddress = tokenContractAddress || null;
+    
+    // Use 'once' strategy for high-frequency minting operations
+    // Only syncs nonce on init and after failures, not before every tx
+    this.nonceManager = new NonceManager(account.address, publicClient, 'once');
   }
 
   /**
    * Start the queue processor
    */
   async start() {
-    console.log(`🔄 Starting queue processor (batch interval: ${this.batchInterval}ms, max batch: ${this.maxBatchSize})`);
+    console.log(`🔄 Starting mint queue processor (batch interval: ${this.batchInterval}ms, max batch: ${this.maxBatchSize})`);
+    
+    // Initialize nonce manager (using 'once' strategy for performance)
+    await this.nonceManager.initialize();
     
     // Load settings from database
     await this.loadSettings();
@@ -277,6 +289,8 @@ export class MintQueueProcessor {
    * Process a batch for a specific token
    */
   private async processBatchForToken(tokenAddress: `0x${string}`, items: QueueItem[]) {
+    let nonce: number | null = null;
+    
     try {
       const addresses: `0x${string}`[] = items.map((item) => item.payer_address as `0x${string}`);
       const txHashes: `0x${string}`[] = items.map((item) => item.tx_hash_bytes32 as `0x${string}`);
@@ -290,6 +304,9 @@ export class MintQueueProcessor {
          WHERE id = ANY($1)`,
         [items.map((item) => item.id)]
       );
+      
+      // Get nonce for this transaction (using cached nonce for performance)
+      nonce = await this.nonceManager.getNextNonce();
 
       // Check remaining supply
       const [remainingSupply, mintAmount] = await Promise.all([
@@ -337,9 +354,11 @@ export class MintQueueProcessor {
           abi: tokenAbi,
           functionName: "mint",
           args: [addresses[0], txHashes[0]],
+          account: this.account,
           gas: gasLimit,
           maxFeePerGas,
           maxPriorityFeePerGas,
+          nonce, // Use managed nonce
         } as any);
       } else {
         // 批量更省：基础 100k + 每个地址 50k
@@ -349,9 +368,11 @@ export class MintQueueProcessor {
           abi: tokenAbi,
           functionName: "batchMint",
           args: [addresses, txHashes],
+          account: this.account,
           gas: gasLimit,
           maxFeePerGas,
           maxPriorityFeePerGas,
+          nonce, // Use managed nonce
         } as any);
       }
       
@@ -432,6 +453,11 @@ export class MintQueueProcessor {
         await client.query("COMMIT");
         console.log(`✅ Batch processing complete: ${items.length} mint(s) successful\n`);
         
+        // Confirm nonce (transaction succeeded)
+        if (nonce !== null) {
+          this.nonceManager.confirmNonce(nonce);
+        }
+        
         // Cache will auto-expire after TTL (no manual invalidation needed for high-frequency mints)
       } catch (error: any) {
         await client.query("ROLLBACK");
@@ -442,6 +468,11 @@ export class MintQueueProcessor {
     } catch (error: any) {
       console.error("❌ Batch processing error:", error.message);
 
+      // Handle failed nonce (resync from chain)
+      if (nonce !== null) {
+        await this.nonceManager.handleFailedNonce(nonce);
+      }
+
       // Mark items as failed
       await this.pool.query(
         `UPDATE mint_queue 
@@ -449,8 +480,6 @@ export class MintQueueProcessor {
          WHERE status = 'processing'`,
         [error.message]
       );
-    } finally {
-      this.isProcessing = false;
     }
   }
 

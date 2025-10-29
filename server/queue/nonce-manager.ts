@@ -1,9 +1,15 @@
 import { PublicClient } from "viem";
 
+export type NonceSyncStrategy = 'always' | 'once';
+
 /**
  * Nonce Manager for safe serial transaction handling
  * Manages nonce state for a single wallet to prevent conflicts
  * Designed for SERIAL processing (one tx at a time)
+ * 
+ * Two strategies:
+ * - 'always': Sync from chain before EVERY transaction (safe, for low-frequency ops like Deploy)
+ * - 'once': Sync only on init and after failures (fast, for high-frequency ops like Mint)
  */
 export class NonceManager {
   private currentNonce: bigint | null = null;
@@ -11,10 +17,16 @@ export class NonceManager {
   private readonly walletAddress: `0x${string}`;
   private readonly publicClient: PublicClient;
   private syncInProgress: boolean = false;
+  private readonly syncStrategy: NonceSyncStrategy;
 
-  constructor(walletAddress: `0x${string}`, publicClient: PublicClient) {
+  constructor(
+    walletAddress: `0x${string}`, 
+    publicClient: PublicClient,
+    syncStrategy: NonceSyncStrategy = 'always'
+  ) {
     this.walletAddress = walletAddress;
     this.publicClient = publicClient as any;
+    this.syncStrategy = syncStrategy;
   }
 
   /**
@@ -22,7 +34,7 @@ export class NonceManager {
    */
   async initialize(): Promise<void> {
     await this.syncFromChain();
-    console.log(`✅ NonceManager initialized for ${this.walletAddress}, starting nonce: ${this.currentNonce}`);
+    console.log(`✅ NonceManager initialized for ${this.walletAddress}, starting nonce: ${this.currentNonce}, strategy: ${this.syncStrategy}`);
   }
 
   /**
@@ -55,18 +67,29 @@ export class NonceManager {
 
   /**
    * Get next available nonce for serial transaction processing
-   * Simply returns and increments the current nonce
+   * Behavior depends on syncStrategy:
+   * - 'always': Syncs from chain before EVERY nonce (safe for low-frequency ops)
+   * - 'once': Only syncs on init or after failures (fast for high-frequency ops)
    */
   async getNextNonce(): Promise<number> {
-    if (this.currentNonce === null) {
-      await this.initialize();
+    if (this.syncStrategy === 'always') {
+      // SAFE MODE: Always sync from chain before getting next nonce
+      // This ensures we have the most up-to-date nonce, even if other
+      // processes or operations have used this wallet
+      await this.syncFromChain();
+      console.log(`➡️  Assigned nonce: ${this.currentNonce} (synced from chain)`);
+    } else {
+      // FAST MODE: Only sync on first call or after failure
+      if (this.currentNonce === null) {
+        await this.initialize();
+      }
+      console.log(`➡️  Assigned nonce: ${this.currentNonce} (cached)`);
     }
 
     const nonce = this.currentNonce!;
     this.lastUsedNonce = nonce;
     this.currentNonce = nonce + 1n;
 
-    console.log(`➡️  Assigned nonce: ${nonce}`);
     return Number(nonce);
   }
 
