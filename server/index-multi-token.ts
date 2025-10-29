@@ -191,7 +191,21 @@ app.get("/api/deploy-address", async (req, res) => {
 });
 
 /**
- * POST /api/deploy - Deploy a new token
+ * Generate a hash code from a string for advisory lock
+ * PostgreSQL advisory locks use bigint (64-bit), so we need a hash within that range
+ */
+function getAdvisoryLockId(str: string): bigint {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  // Use absolute value and ensure it's within PostgreSQL bigint range
+  return BigInt(Math.abs(hash));
+}
+
+/**
+ * POST /api/deploy - Deploy a new token (with database lock for concurrency control)
  */
 app.post("/api/deploy", async (req, res) => {
   if (!pool) {
@@ -201,6 +215,8 @@ app.post("/api/deploy", async (req, res) => {
     });
   }
 
+  const client = await pool.connect();
+  
   try {
     const { name, symbol, mintAmount, maxMintCount, price, paymentToken, deployer, authorization, imageUrl, description } = req.body;
 
@@ -216,7 +232,7 @@ app.post("/api/deploy", async (req, res) => {
     if (!authorization || !authorization.signature) {
       return res.status(400).json({
         error: "Missing payment authorization",
-        message: "Deployment requires 1 USDC payment authorization",
+        message: "Deployment requires 10 USDC payment authorization",
       });
     }
 
@@ -246,6 +262,26 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
 
+    // 🔒 Acquire advisory lock to prevent concurrent deployments
+    // Use a deployment-specific lock ID
+    const lockId = getAdvisoryLockId('token-deployment-global');
+    
+    console.log(`\n🔒 Acquiring deployment lock (ID: ${lockId})...`);
+    
+    await client.query('BEGIN');
+    const lockResult = await client.query('SELECT pg_try_advisory_xact_lock($1) as acquired', [lockId.toString()]);
+    
+    if (!lockResult.rows[0].acquired) {
+      await client.query('ROLLBACK');
+      console.log(`⏳ Another deployment in progress, client must wait...`);
+      return res.status(503).json({
+        error: "Deployment in progress",
+        message: "Another token is currently being deployed. Please wait a moment and try again.",
+        retryAfter: 5, // Suggest retry after 5 seconds
+      });
+    }
+    
+    console.log(`✅ Lock acquired! Proceeding with deployment...`);
     console.log(`\n🚀 Deploying new token: ${name} (${symbol})`);
     console.log(`   Deployer: ${deployer}`);
     console.log(`   Mint Amount: ${mintAmount} tokens`);
@@ -359,6 +395,10 @@ app.post("/api/deploy", async (req, res) => {
     const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
     console.log(`✅ Token saved to database`);
 
+    // Commit transaction and release lock
+    await client.query('COMMIT');
+    console.log(`🔓 Lock released`);
+
     // Cache will auto-expire after TTL (no manual invalidation needed)
 
     // Calculate required vs total USDC
@@ -390,10 +430,22 @@ app.post("/api/deploy", async (req, res) => {
     });
   } catch (error: any) {
     console.error("❌ Deploy error:", error.message);
+    
+    // Rollback transaction and release lock
+    try {
+      await client.query('ROLLBACK');
+      console.log(`🔓 Lock released (rollback)`);
+    } catch (rollbackError) {
+      console.error("❌ Rollback error:", rollbackError);
+    }
+    
     return res.status(500).json({
       error: "Deployment failed",
       message: error.message,
     });
+  } finally {
+    // Always release the client back to the pool
+    client.release();
   }
 });
 

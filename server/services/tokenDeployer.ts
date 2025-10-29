@@ -1,6 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, readFileSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Pool } from 'pg';
@@ -166,7 +166,11 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   // Generate deployment script (Simplified)
   // Use CONTRACTS_DIR env var if set, otherwise use relative path
   const contractsDir = process.env.CONTRACTS_DIR || join(__dirname, '../../../contracts');
-  const deployScriptPath = join(contractsDir, 'scripts/deployToken-generated.js');
+  
+  // Use unique filename to avoid concurrent deployment conflicts
+  const timestamp = Date.now();
+  const randomId = Math.random().toString(36).slice(2, 10);
+  const deployScriptPath = join(contractsDir, `scripts/deployToken-${timestamp}-${randomId}.js`);
   
   console.log(`📝 Writing deployment script to: ${deployScriptPath}`);
   
@@ -275,8 +279,11 @@ main()
     // Map network name to Hardhat config format (base-sepolia -> baseSepolia)
     const hardhatNetwork = config.network === 'base-sepolia' ? 'baseSepolia' : 'base';
     
+    // Extract filename from path for execution
+    const scriptFilename = deployScriptPath.split('/').pop();
+    
     const { stdout, stderr } = await execAsync(
-      `cd ${contractsDir} && npx hardhat run scripts/deployToken-generated.js --network ${hardhatNetwork}`,
+      `cd ${contractsDir} && npx hardhat run scripts/${scriptFilename} --network ${hardhatNetwork}`,
       { timeout: 300000 } // 5 minute timeout
     );
 
@@ -290,9 +297,26 @@ main()
     }
 
     const result: DeployResult = JSON.parse(resultMatch[1]);
+    
+    // Clean up temporary deployment script
+    try {
+      unlinkSync(deployScriptPath);
+      console.log(`🧹 Cleaned up temporary script: ${scriptFilename}`);
+    } catch (cleanupError: any) {
+      console.warn(`⚠️  Failed to cleanup script file: ${cleanupError.message}`);
+    }
+    
     return result;
   } catch (error: any) {
     console.error('Deployment error:', error);
+    
+    // Clean up temporary script even on error
+    try {
+      unlinkSync(deployScriptPath);
+    } catch (cleanupError) {
+      // Ignore cleanup errors
+    }
+    
     throw new Error(`Token deployment failed: ${error.message}`);
   }
 }
