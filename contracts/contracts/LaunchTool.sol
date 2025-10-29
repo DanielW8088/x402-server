@@ -85,7 +85,7 @@ contract LaunchTool {
         int24 tickLower,
         int24 tickUpper,
         uint24 fee
-    ) external returns (uint256 positionId) {
+    ) external OnlyAdmin returns (uint256 positionId) {
         // Validate inputs
         if (token0 == token1) revert SameTokenError();
         if (token0 >= token1) revert TokenOrderingError();
@@ -166,7 +166,7 @@ contract LaunchTool {
         int24 tickLower,
         int24 tickUpper,
         uint24 fee
-    ) external returns (uint256 positionId) {
+    ) external OnlyAdmin returns (uint256 positionId) {
         // Validate inputs
         if (token0 == token1) revert SameTokenError();
         if (token0 >= token1) revert TokenOrderingError();

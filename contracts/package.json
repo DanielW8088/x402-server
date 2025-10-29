@@ -6,6 +6,8 @@
     "compile": "hardhat compile",
     "deploy:sepolia": "hardhat run scripts/deployToken.js --network baseSepolia",
     "deploy:mainnet": "hardhat run scripts/deployToken.js --network base",
+    "deploy:launchtool:sepolia": "hardhat run scripts/deployLaunchTool.js --network baseSepolia",
+    "deploy:launchtool:mainnet": "hardhat run scripts/deployLaunchTool.js --network base",
     "grant:sepolia": "hardhat run scripts/grantMinterRole.js --network baseSepolia",
     "grant:mainnet": "hardhat run scripts/grantMinterRole.js --network base",
     "check:sepolia": "hardhat run scripts/checkMinterRole.js --network baseSepolia",
