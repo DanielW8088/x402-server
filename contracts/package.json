@@ -25,6 +25,6 @@
     "@uniswap/v3-periphery": "^1.4.1",
     "dotenv": "^16.6.1",
     "ethers": "^6.15.0",
-    "hardhat": "^2.26.3"
+    "hardhat-tracer": "^3.4.0"
   }
 }

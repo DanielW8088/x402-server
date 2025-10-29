@@ -79,6 +79,19 @@ async function main() {
   console.log("Creating pool and adding liquidity...");
 
   // print all debug info
+  // Using signer: 0xf7a66e2749152cc77f9F56a679EE7A1A9F5806aF
+  // Approving tokens for LaunchTool...
+  // Creating pool and adding liquidity...
+  // Token0: 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+  // Token1: 0xC9561C362E5706eB5c3c537d13f1E9949304638b
+  // Amount0: 1000000
+  // Amount1: 20000000000000000000000
+  // SqrtPriceX96: 11204554194957227983746387645491634352
+  // TickLower: -887220
+  // TickUpper: 887220
+  // Fee: 10000
+  // ❌ Error during liquidity provision: ProviderError: execution reverted
+
   console.log("Token0:", token0);
   console.log("Token1:", token1);
   console.log("Amount0:", amount0.toString());
