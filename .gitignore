@@ -7,7 +7,7 @@ dist/
 cache/
 artifacts/
 typechain-types/
-
+package-lock.json
 # IDEs
 .vscode/
 .idea/

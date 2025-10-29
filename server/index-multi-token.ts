@@ -303,17 +303,10 @@ async function verifyX402Payment(
     console.log(`   - authorization.to:`, paymentPayload.payload?.authorization?.to);
     console.log(`   - authorization.value:`, paymentPayload.payload?.authorization?.value);
     
-    // For testnet (base-sepolia), use x402.org facilitator
-    // For mainnet (base), use Coinbase facilitator (default)
-    const x402Config = network === 'base-sepolia' 
-      ? { facilitatorUrl: 'https://x402.org/facilitator' }
-      : {};
-    
     const verifyResult = await verify(
       publicClient as any,
       paymentPayload,
-      paymentRequirements,
-      x402Config
+      paymentRequirements
     );
     
     console.log(`📊 Verify result:`, JSON.stringify(verifyResult, null, 2));
@@ -429,20 +422,13 @@ async function settleX402Payment(
     console.log(`📋 Settling with payment requirements:`, JSON.stringify(paymentRequirements, null, 2));
     console.log(`📋 Payment payload:`, JSON.stringify(paymentPayload, null, 2));
     
-    // For testnet (base-sepolia), use x402.org facilitator
-    // For mainnet (base), use Coinbase facilitator (default)
-    const x402Config = network === 'base-sepolia' 
-      ? { facilitatorUrl: 'https://x402.org/facilitator' }
-      : {};
-    
     // Use x402 settle function with combined client to execute on-chain payment
     // combinedClient has both verifyTypedData (from publicClient) and signing (from walletClient)
     try {
       const settleResult = await settle(
         combinedClient,
         paymentPayload,
-        paymentRequirements,
-        x402Config
+        paymentRequirements
       );
       
       console.log(`📊 Settle result:`, JSON.stringify(settleResult, null, 2));
