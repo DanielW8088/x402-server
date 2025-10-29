@@ -709,114 +709,106 @@ app.post("/api/mint/:address", async (req, res) => {
     const { address: tokenAddress } = req.params;
     const tokenContractAddress = tokenAddress as `0x${string}`;
     
-    let payer: `0x${string}`;
-    let paymentTxHash: string | undefined;
-    let isGasless = false;
-    
-    // Check if this is a gasless request with EIP-3009 authorization
+    // 🔒 SECURITY: Payment verification is REQUIRED
     const authorization = req.body.authorization;
     
-    if (authorization && authorization.signature) {
-      // Gasless mode: Use EIP-3009
-      console.log(`🆓 Gasless mint request`);
-      payer = authorization.from as `0x${string}`;
-      isGasless = true;
-      
-      // Get token info for payment token address
-      let paymentTokenAddress: `0x${string}`;
-      if (pool) {
-        const dbToken = await getToken(pool, tokenAddress);
-        if (dbToken) {
-          paymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
-        } else {
-          // Fallback to USDC
-          paymentTokenAddress = network === 'base-sepolia' 
-            ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
-            : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
-        }
+    if (!authorization || !authorization.signature) {
+      return res.status(400).json({
+        error: "Payment authorization required",
+        message: "Must provide EIP-3009 payment authorization to mint tokens",
+      });
+    }
+    
+    // Gasless mode with payment verification
+    console.log(`🆓 Gasless mint request with payment verification`);
+    const payer = authorization.from as `0x${string}`;
+    let paymentTxHash: string | undefined;
+    
+    // Get token info for payment token address
+    let paymentTokenAddress: `0x${string}`;
+    if (pool) {
+      const dbToken = await getToken(pool, tokenAddress);
+      if (dbToken) {
+        paymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
       } else {
+        // Fallback to USDC
         paymentTokenAddress = network === 'base-sepolia' 
           ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
           : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
       }
-      
-      // Verify authorization is to the correct token contract address
-      if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
-        console.error(`❌ Invalid payment recipient: expected ${tokenAddress}, got ${authorization.to}`);
-        return res.status(400).json({
-          error: "Invalid payment recipient",
-          message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
-        });
-      }
-      
-      console.log(`✅ Payment recipient verified: ${tokenAddress}`);
-      
-      // Execute transferWithAuthorization
-      try {
-        const sig = authorization.signature.startsWith('0x') 
-          ? authorization.signature.slice(2) 
-          : authorization.signature;
-        
-        const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
-        const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
-        let v = parseInt(sig.slice(128, 130), 16);
-        
-        if (v === 0 || v === 1) v = v + 27;
-        
-        // EIP-1559 省钱模式
-        const block = await publicClient.getBlock();
-        const baseFeePerGas = block.baseFeePerGas || 100000000n;
-        const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
-        const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
-        
-        const authHash = await walletClient.writeContract({
-          address: paymentTokenAddress,
-          abi: usdcAbi,
-          functionName: "transferWithAuthorization",
-          args: [
-            getAddress(authorization.from),
-            getAddress(authorization.to),
-            BigInt(authorization.value),
-            BigInt(authorization.validAfter),
-            BigInt(authorization.validBefore),
-            authorization.nonce as `0x${string}`,
-            v,
-            r,
-            s,
-          ],
-          gas: 150000n, // 降低 gas limit
-          maxFeePerGas,
-          maxPriorityFeePerGas,
-        });
-        
-        console.log(`✅ USDC transfer executed: ${authHash}`);
-        
-        const authReceipt = await publicClient.waitForTransactionReceipt({ 
-          hash: authHash,
-          confirmations: 1,
-        });
-        
-        if (authReceipt.status !== "success") {
-          throw new Error("USDC transfer reverted");
-        }
-        
-        paymentTxHash = authHash;
-      } catch (error: any) {
-        console.error("❌ transferWithAuthorization failed:", error.message);
-        return res.status(400).json({
-          error: "USDC transfer failed",
-          message: error.message,
-        });
-      }
     } else {
-      // Regular mode
-      payer = req.body.payer as `0x${string}`;
+      paymentTokenAddress = network === 'base-sepolia' 
+        ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+        : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+    }
+    
+    // Verify authorization is to the correct token contract address
+    if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
+      console.error(`❌ Invalid payment recipient: expected ${tokenAddress}, got ${authorization.to}`);
+      return res.status(400).json({
+        error: "Invalid payment recipient",
+        message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
+      });
+    }
+    
+    console.log(`✅ Payment recipient verified: ${tokenAddress}`);
+    
+    // Execute transferWithAuthorization (payment verification)
+    try {
+      const sig = authorization.signature.startsWith('0x') 
+        ? authorization.signature.slice(2) 
+        : authorization.signature;
       
-      if (!payer) {
-        return res.status(400).json({
-          error: "Missing payer address",
-        });
+      const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
+      const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
+      let v = parseInt(sig.slice(128, 130), 16);
+      
+      if (v === 0 || v === 1) v = v + 27;
+      
+      // EIP-1559 省钱模式
+      const block = await publicClient.getBlock();
+      const baseFeePerGas = block.baseFeePerGas || 100000000n;
+      const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
+      const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
+      
+      const authHash = await walletClient.writeContract({
+        address: paymentTokenAddress,
+        abi: usdcAbi,
+        functionName: "transferWithAuthorization",
+        args: [
+          getAddress(authorization.from),
+          getAddress(authorization.to),
+          BigInt(authorization.value),
+          BigInt(authorization.validAfter),
+          BigInt(authorization.validBefore),
+          authorization.nonce as `0x${string}`,
+          v,
+          r,
+          s,
+        ],
+        gas: 150000n,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
+      });
+      
+      console.log(`✅ USDC transfer executed: ${authHash}`);
+      
+      const authReceipt = await publicClient.waitForTransactionReceipt({ 
+        hash: authHash,
+        confirmations: 1,
+      });
+      
+      if (authReceipt.status !== "success") {
+        throw new Error("USDC transfer reverted");
       }
+      
+      paymentTxHash = authHash;
+    } catch (error: any) {
+      console.error("❌ transferWithAuthorization failed:", error.message);
+      return res.status(400).json({
+        error: "Payment verification failed",
+        message: error.message,
+      });
     }
 
     // Generate unique transaction hash
@@ -866,8 +858,8 @@ app.post("/api/mint/:address", async (req, res) => {
       payer,
       txHashBytes32,
       paymentTxHash,
-      isGasless ? authorization : undefined,
-      isGasless ? "gasless" : "x402",
+      authorization,
+      "gasless",
       tokenAddress
     );
 
@@ -878,20 +870,15 @@ app.post("/api/mint/:address", async (req, res) => {
 
     const response: any = {
       success: true,
-      message: isGasless 
-        ? "Added to mint queue (gasless!)" 
-        : "Added to mint queue",
+      message: "Added to mint queue (gasless!)",
       queueId,
       payer,
       status: queueStatus.status,
       queuePosition: queueStatus.queue_position,
       estimatedWaitSeconds: queueStatus.queue_position * 10, // rough estimate
       amount: mintAmountPerPayment.toString(),
+      paymentTxHash: paymentTxHash,
     };
-
-    if (paymentTxHash) {
-      response.paymentTxHash = paymentTxHash;
-    }
 
     return res.status(200).json(response);
   } catch (error: any) {
