@@ -80,7 +80,7 @@ function alignFullRangeTicks(tickSpacing: number): { lower: number; upper: numbe
 
 // ---- sample params (Base Sepolia) ----
 const CHAIN = USE_BASE_SEPOLIA ? baseSepolia : base;
-const RPC = USE_BASE_SEPOLIA ? "https://sepolia.base.org" : process.env.BASE_RPC_URL || "https://mainnet.base.org"; // set your mainnet RPC if needed
+const RPC = USE_BASE_SEPOLIA ? "https://sepolia.base.org" : "https://mainnet.base.org"; // set your mainnet RPC if needed
 
 // Replace with your deployer key
 const lpAccount = privateKeyToAccount(LP_DEPLOYER_PK as `0x${string}`);
@@ -105,8 +105,8 @@ async function main() {
 
     // https://sepolia.basescan.org/tx/0x9728478344b3aca26069e8be173c1770e6bd079a1aeab7bb4045511ff48c404f
     // somehow the second token will only send 0.000000000019999993
-    BigInt(0.1 * 10 ** 6), // 0.5 USDC (6 decimals)
-    BigInt(2000 * 10 ** 18), // 1000 tokens (18 decimals)
+    BigInt(1 * 10 ** 6), // 1 USDC (6 decimals)
+    BigInt(2000 * 10 ** 18), // 2000 tokens (18 decimals)
 
     1 // retries
   );
@@ -150,11 +150,16 @@ export async function deployLP(
   const amount0Desired = token0IsUSDC ? usdcAmountToDeployLP : tokenAmountToDeployLP;
   const amount1Desired = token0IsUSDC ? tokenAmountToDeployLP : usdcAmountToDeployLP;
 
+  console.log("amount0Desired:", amount0Desired.toString());
+  console.log("amount1Desired:", amount1Desired.toString());
+
   // Initial price (Q64.96) from integer ratio (token1/token0):
   const sqrtPriceX96 = encodeSqrtRatioX96(
     JSBI.BigInt(amount1Desired.toString()),
     JSBI.BigInt(amount0Desired.toString())
   );
+
+  console.log("sqrtPriceX96:", sqrtPriceX96.toString());
 
   // Full-range ticks aligned to spacing
   const tickSpacing = spacingForFee(poolFee);
