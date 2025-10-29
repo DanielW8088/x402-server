@@ -582,7 +582,6 @@ contract LaunchTool {
             revert PoolAlreadyExists();
         }
 
-        revert DebugError1();
         // Transfer tokens from user to this contract
         IERC20(token0).transferFrom(msg.sender, address(this), token0Amount);
         IERC20(token1).transferFrom(msg.sender, address(this), token1Amount);
@@ -590,8 +589,6 @@ contract LaunchTool {
         // Approve position manager to spend tokens
         IERC20(token0).approve(address(positionManager), token0Amount);
         IERC20(token1).approve(address(positionManager), token1Amount);
-
-        revert DebugError2();
 
         // Prepare mint parameters with 1% slippage tolerance
         INonfungiblePositionManager.MintParams
@@ -608,13 +605,10 @@ contract LaunchTool {
                 recipient: msg.sender,
                 deadline: block.timestamp
             });
-        revert DebugError3();
 
         // Mint liquidity position
         uint128 liquidity;
         (positionId, liquidity, , ) = positionManager.mint(params);
-
-        revert DebugError4();
 
         emit PoolConfigured(pool, token0, token1, positionId, liquidity);
 
