@@ -454,18 +454,20 @@ function listWallets(options: { limit?: number; offset?: number; minBalance?: st
  * Uses database balance only (no automatic refresh)
  */
 async function batchMintConcurrent(
-  startId: number,
-  endId: number,
+  startIndex: number,
+  endIndex: number,
   totalMints: number,
   concurrency: number = 10,
   delayMs: number = 1000,
+  quantityPerMint: number = 10, // Default 10 to save gas (1-10)
   minUsdcBalance: string = "100000" // 0.1 USDC minimum
 ) {
   console.log(`\n🚀 Concurrent Batch Mint Configuration:`);
-  console.log(`   Wallet IDs: ${startId} to ${endId}`);
-  console.log(`   Total mints: ${totalMints}`);
+  console.log(`   Wallet address_index: ${startIndex} to ${endIndex}`);
+  console.log(`   Total mint requests: ${totalMints}`);
+  console.log(`   Quantity per mint: ${quantityPerMint}x (Total tokens: ${totalMints * quantityPerMint})`);
   console.log(`   Concurrent workers: ${concurrency}`);
-  console.log(`   Delay between mints: ${delayMs}ms`);
+  console.log(`   Delay between requests: ${delayMs}ms`);
   console.log(`   Min USDC balance: ${formatUnits(BigInt(minUsdcBalance), 6)} USDC`);
   console.log(`   Token: ${tokenAddress}`);
   console.log(`   Network: ${network}`);
@@ -484,8 +486,8 @@ async function batchMintConcurrent(
 
   // Get all wallets and calculate max mints for each
   const allWallets = db.prepare(
-    "SELECT id, address_index, address, private_key, usdc_balance FROM wallets WHERE id >= ? AND id <= ? ORDER BY id"
-  ).all(startId, endId) as any[];
+    "SELECT id, address_index, address, private_key, usdc_balance FROM wallets WHERE address_index >= ? AND address_index <= ? ORDER BY address_index"
+  ).all(startIndex, endIndex) as any[];
 
   if (allWallets.length === 0) {
     console.error("❌ No wallets found in specified range");
@@ -493,19 +495,30 @@ async function batchMintConcurrent(
   }
 
   // Calculate max mints per wallet based on database balance
+  // Each mint request costs (pricePerMint * quantityPerMint) USDC
+  const pricePerRequest = pricePerMintWei * BigInt(quantityPerMint);
+  
   const walletsWithMintInfo = allWallets.map(w => {
     const balance = BigInt(w.usdc_balance || 0);
-    const maxMints = balance > 0n ? Number(balance / pricePerMintWei) : 0;
+    
+    // Calculate how many full quantity mints this wallet can afford
+    const maxFullMints = balance > 0n ? Number(balance / pricePerRequest) : 0;
+    
+    // Calculate how many individual tokens this wallet can afford
+    const maxTokens = balance > 0n ? Number(balance / pricePerMintWei) : 0;
+    
     return {
       ...w,
       balance,
-      maxMints,
-      currentMints: 0, // Track how many times this wallet has minted
+      maxMints: maxFullMints,
+      maxTokens, // Total tokens this wallet can afford
+      currentMints: 0, // Track how many mint requests this wallet has sent
+      mintedTokens: 0, // Track actual number of tokens minted
     };
   });
 
-  // Filter out wallets with 0 balance
-  const availableWallets = walletsWithMintInfo.filter(w => w.maxMints > 0);
+  // Filter out wallets with 0 balance (but keep wallets with partial balance)
+  const availableWallets = walletsWithMintInfo.filter(w => w.maxTokens > 0);
 
   console.log(`\n📊 Wallet Balance Summary:`);
   console.log(`   Total wallets in range: ${allWallets.length}`);
@@ -517,7 +530,8 @@ async function batchMintConcurrent(
   const sortedByBalance = [...availableWallets].sort((a, b) => Number(b.balance - a.balance));
   for (let i = 0; i < Math.min(10, sortedByBalance.length); i++) {
     const w = sortedByBalance[i];
-    console.log(`   #${w.id}: ${formatUnits(w.balance, 6)} USDC → max ${w.maxMints} mints`);
+    const mintsInfo = w.maxMints > 0 ? `${w.maxMints} full mints (${quantityPerMint}x each)` : `${w.maxTokens} tokens (partial)`;
+    console.log(`   #${w.id}: ${formatUnits(w.balance, 6)} USDC → ${w.maxTokens} tokens max (${mintsInfo})`);
   }
   
   if (availableWallets.length === 0) {
@@ -526,13 +540,17 @@ async function batchMintConcurrent(
     return;
   }
   
-  // Calculate total possible mints
+  // Calculate total possible tokens
+  const totalPossibleTokens = availableWallets.reduce((sum, w) => sum + w.maxTokens, 0);
   const totalPossibleMints = availableWallets.reduce((sum, w) => sum + w.maxMints, 0);
-  console.log(`\n   Total possible mints: ${totalPossibleMints}`);
+  console.log(`\n   Total tokens available: ${totalPossibleTokens}`);
+  console.log(`   Estimated mint requests needed: ~${Math.ceil(totalPossibleTokens / quantityPerMint)} (at ${quantityPerMint}x per request)`);
   
-  if (totalMints > totalPossibleMints) {
-    console.warn(`\n⚠️  Warning: Requested ${totalMints} mints but only ${totalPossibleMints} possible`);
-    console.warn(`   Will mint ${totalPossibleMints} times instead`);
+  const estimatedRequestsNeeded = Math.ceil(totalPossibleTokens / quantityPerMint);
+  if (totalMints > estimatedRequestsNeeded) {
+    console.warn(`\n⚠️  Warning: Requested ${totalMints} mint requests but only ~${estimatedRequestsNeeded} needed`);
+    console.warn(`   Total tokens available: ${totalPossibleTokens}`);
+    console.warn(`   💡 Tip: Reduce total requests or add more USDC to wallets`);
   }
 
   // Confirm
@@ -622,18 +640,24 @@ async function batchMintConcurrent(
           continue;
         }
 
-        // Check if wallet reached max mints
-        if (wallet.currentMints >= wallet.maxMints) {
-          console.log(`\n✅ Worker ${workerId}: Wallet #${wallet.id} - reached max mints (${wallet.maxMints})`);
+        // Calculate remaining tokens this wallet can afford
+        const remainingTokens = wallet.maxTokens - wallet.mintedTokens;
+        
+        if (remainingTokens <= 0) {
+          console.log(`\n✅ Worker ${workerId}: Wallet #${wallet.id} - no tokens remaining`);
           exhaustedWallets.add(wallet.id);
           continue;
         }
 
         try {
-          const remainingMints = wallet.maxMints - wallet.currentMints;
+          // Dynamically adjust quantity based on remaining balance
+          const actualQuantity = Math.min(quantityPerMint, remainingTokens);
+          const actualPrice = pricePerMintWei * BigInt(actualQuantity);
+          
           console.log(`\n💼 Worker ${workerId}: Wallet #${wallet.id} (${wallet.address.slice(0, 10)}...)`);
           console.log(`   Balance: ${formatUnits(wallet.balance, 6)} USDC`);
-          console.log(`   Mints: ${wallet.currentMints}/${wallet.maxMints} (${remainingMints} remaining)`);
+          console.log(`   Tokens: ${wallet.mintedTokens}/${wallet.maxTokens} minted, ${remainingTokens} remaining`);
+          console.log(`   This request: ${actualQuantity}x tokens (${formatUnits(actualPrice, 6)} USDC)`);
           
           // Create account from stored private key
           const account = privateKeyToAccount(wallet.private_key as `0x${string}`);
@@ -644,22 +668,23 @@ async function batchMintConcurrent(
             transport: http(rpcUrl),
           });
 
-          console.log(`   💳 Creating EIP-3009 authorization...`);
+          console.log(`   💳 Creating EIP-3009 authorization (${formatUnits(actualPrice, 6)} USDC)...`);
           
-          // Create authorization (reuse token info from earlier)
+          // Create authorization with actual payment amount
           const authorization = await createTransferAuthorization(
             walletClient,
             account,
             account.address,
             tokenInfo.paymentAddress as `0x${string}`,
-            pricePerMintWei
+            actualPrice
           );
           
-          console.log(`   📤 Sending mint request...`);
+          console.log(`   📤 Sending mint request (${actualQuantity}x)...`);
           
           const response = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
             payer: account.address,
             authorization: authorization,
+            quantity: actualQuantity,
           });
           
           console.log(`   📨 Response status: ${response.status}`);
@@ -671,13 +696,16 @@ async function batchMintConcurrent(
             console.log(`   ✅ Worker ${workerId}: Minted ${result.mintTxHash?.slice(0, 10) || 'success'}`);
           }
           
-          // Increment wallet's mint count
+          // Increment wallet's mint count and track actual tokens minted
           wallet.currentMints++;
+          wallet.mintedTokens += actualQuantity; // Track actual tokens minted
           state.successCount++;
           
-          // Check if wallet is now exhausted
-          if (wallet.currentMints >= wallet.maxMints) {
-            console.log(`   🎯 Worker ${workerId}: Wallet #${wallet.id} - all mints used (${wallet.maxMints}/${wallet.maxMints})`);
+          // Check if wallet is now exhausted (no more tokens can be minted)
+          const newRemainingTokens = wallet.maxTokens - wallet.mintedTokens;
+          
+          if (newRemainingTokens <= 0) {
+            console.log(`   🎯 Worker ${workerId}: Wallet #${wallet.id} - all tokens used (${wallet.maxTokens} total)`);
             exhaustedWallets.add(wallet.id);
           }
 
@@ -710,12 +738,19 @@ async function batchMintConcurrent(
 
   console.log("\n" + "=".repeat(70));
   console.log("✨ Concurrent batch mint completed!");
-  console.log(`   Success: ${state.successCount}`);
-  console.log(`   Failed: ${state.failCount}`);
-  console.log(`   Total: ${state.completedMints}`);
+  console.log(`   Successful mint requests: ${state.successCount}`);
+  console.log(`   Failed mint requests: ${state.failCount}`);
+  console.log(`   Total mint requests: ${state.completedMints}`);
+  
+  // Calculate actual tokens minted
+  const totalTokensMinted = availableWallets.reduce((sum, w) => sum + w.mintedTokens, 0);
+  console.log(`   Total tokens minted: ${totalTokensMinted}`);
   
   const usedWallets = availableWallets.filter(w => w.currentMints > 0);
-  const exhaustedCount = availableWallets.filter(w => w.currentMints >= w.maxMints).length;
+  const exhaustedCount = availableWallets.filter(w => {
+    const remainingTokens = w.maxTokens - w.mintedTokens;
+    return remainingTokens <= 0;
+  }).length;
   
   console.log(`   Wallets used: ${usedWallets.length}`);
   console.log(`   Wallets exhausted: ${exhaustedCount}`);
@@ -723,8 +758,8 @@ async function batchMintConcurrent(
   // Show wallet usage summary
   console.log(`\n📊 Wallet Usage Summary:`);
   for (const w of usedWallets) {
-    const percentage = (w.currentMints / w.maxMints * 100).toFixed(1);
-    console.log(`   #${w.id}: ${w.currentMints}/${w.maxMints} mints (${percentage}%)`);
+    const percentage = (w.mintedTokens / w.maxTokens * 100).toFixed(1);
+    console.log(`   #${w.id}: ${w.currentMints} requests → ${w.mintedTokens}/${w.maxTokens} tokens (${percentage}%)`);
   }
 }
 
@@ -766,13 +801,13 @@ async function fetchWalletBalances(walletIds: number[]) {
  * Uses database balance only (no automatic refresh)
  */
 async function batchMint(
-  startId: number,
-  endId: number,
+  startIndex: number,
+  endIndex: number,
   times: number,
   delayMs: number = 1000
 ) {
   console.log(`\n🚀 Batch Mint Configuration:`);
-  console.log(`   Wallet IDs: ${startId} to ${endId}`);
+  console.log(`   Wallet address_index: ${startIndex} to ${endIndex}`);
   console.log(`   Mints per wallet: ${times} (requested)`);
   console.log(`   Delay between mints: ${delayMs}ms`);
   console.log(`   Token: ${tokenAddress}`);
@@ -791,8 +826,8 @@ async function batchMint(
 
   // Get wallets in range
   const wallets = db.prepare(
-    "SELECT id, address_index, address, private_key, usdc_balance FROM wallets WHERE id >= ? AND id <= ? ORDER BY id"
-  ).all(startId, endId) as any[];
+    "SELECT id, address_index, address, private_key, usdc_balance FROM wallets WHERE address_index >= ? AND address_index <= ? ORDER BY address_index"
+  ).all(startIndex, endIndex) as any[];
 
   if (wallets.length === 0) {
     console.error("❌ No wallets found in specified range");
@@ -946,24 +981,31 @@ async function main() {
     console.log("  test-trad <wallet_id>     Test traditional EIP-3009 flow with one wallet");
     console.log("  compare <id1> <id2> ...   Compare DB vs chain balances");
     console.log("  mint <start> <end> <times> [delay]  Sequential batch mint");
-    console.log("                            start: start wallet ID");
-    console.log("                            end: end wallet ID");
+    console.log("                            start: start wallet address_index");
+    console.log("                            end: end wallet address_index");
     console.log("                            times: mints per wallet");
     console.log("                            delay: ms between mints (default: 1000)");
-    console.log("  concurrent <start> <end> <total> [workers] [delay]  Concurrent mint");
-    console.log("                            start: start wallet ID");
-    console.log("                            end: end wallet ID");
-    console.log("                            total: total number of mints");
+    console.log("  concurrent <start> <end> <total> [workers] [delay] [quantity]  Concurrent mint");
+    console.log("                            start: start wallet address_index");
+    console.log("                            end: end wallet address_index");
+    console.log("                            total: total number of mint requests");
     console.log("                            workers: concurrent workers (default: 10)");
-    console.log("                            delay: ms between mints (default: 1000)");
+    console.log("                            delay: ms between requests (default: 1000)");
+    console.log("                            quantity: tokens per mint (default: 10, max: 10)");
+    console.log("                            💡 Use quantity=10 to save gas fees!");
     console.log("\nExample:");
     console.log("  npm run batch generate 1000");
     console.log("  npm run batch fetch-balances");
     console.log("  npm run batch check-price");
     console.log("  npm run batch test-trad 1");
     console.log("  npm run batch compare 1 2 3");
-    console.log("  npm run batch mint 1 10 5 2000");
-    console.log("  npm run batch concurrent 1 100 1000 10 1000");
+    console.log("  npm run batch mint 0 9 5 2000");
+    console.log("");
+    console.log("  # 💰 Recommended: 100 requests × 10 tokens = 1000 tokens (saves gas!)");
+    console.log("  npm run batch concurrent 0 99 100");
+    console.log("");
+    console.log("  # Alternative: 1000 requests × 1 token = 1000 tokens (more distributed)");
+    console.log("  npm run batch concurrent 0 99 1000 10 1000 1");
     return;
   }
 
@@ -1022,41 +1064,42 @@ async function main() {
       }
 
       case "mint": {
-        const startId = parseInt(args[1]);
-        const endId = parseInt(args[2]);
+        const startIndex = parseInt(args[1]);
+        const endIndex = parseInt(args[2]);
         const times = parseInt(args[3]);
         const delay = args[4] ? parseInt(args[4]) : 1000;
 
-        if (isNaN(startId) || isNaN(endId) || isNaN(times)) {
+        if (isNaN(startIndex) || isNaN(endIndex) || isNaN(times)) {
           console.error("❌ Invalid parameters for mint command");
-          console.error("Usage: mint <start_id> <end_id> <times> [delay_ms]");
+          console.error("Usage: mint <start_index> <end_index> <times> [delay_ms]");
           process.exit(1);
         }
 
-        if (startId < 1 || endId < startId) {
-          console.error("❌ Invalid ID range");
+        if (startIndex < 0 || endIndex < startIndex) {
+          console.error("❌ Invalid address_index range (must be >= 0)");
           process.exit(1);
         }
 
-        await batchMint(startId, endId, times, delay);
+        await batchMint(startIndex, endIndex, times, delay);
         break;
       }
 
       case "concurrent": {
-        const startId = parseInt(args[1]);
-        const endId = parseInt(args[2]);
+        const startIndex = parseInt(args[1]);
+        const endIndex = parseInt(args[2]);
         const totalMints = parseInt(args[3]);
         const workers = args[4] ? parseInt(args[4]) : 10;
         const delay = args[5] ? parseInt(args[5]) : 1000;
+        const quantity = args[6] ? parseInt(args[6]) : 10; // Default 10 to save gas
 
-        if (isNaN(startId) || isNaN(endId) || isNaN(totalMints)) {
+        if (isNaN(startIndex) || isNaN(endIndex) || isNaN(totalMints)) {
           console.error("❌ Invalid parameters for concurrent command");
-          console.error("Usage: concurrent <start_id> <end_id> <total_mints> [workers] [delay_ms]");
+          console.error("Usage: concurrent <start_index> <end_index> <total_mints> [workers] [delay_ms] [quantity]");
           process.exit(1);
         }
 
-        if (startId < 1 || endId < startId) {
-          console.error("❌ Invalid ID range");
+        if (startIndex < 0 || endIndex < startIndex) {
+          console.error("❌ Invalid address_index range (must be >= 0)");
           process.exit(1);
         }
 
@@ -1065,7 +1108,12 @@ async function main() {
           process.exit(1);
         }
 
-        await batchMintConcurrent(startId, endId, totalMints, workers, delay);
+        if (quantity < 1 || quantity > 10) {
+          console.error("❌ Quantity must be between 1 and 10");
+          process.exit(1);
+        }
+
+        await batchMintConcurrent(startIndex, endIndex, totalMints, workers, delay, quantity);
         break;
       }
 

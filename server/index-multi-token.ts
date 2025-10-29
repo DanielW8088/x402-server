@@ -1497,14 +1497,14 @@ async function start() {
   try {
     const configResult = await pool.query(`
       SELECT key, value FROM system_settings 
-      WHERE key IN ('batch_interval_seconds', 'payment_batch_interval_seconds')
+      WHERE key IN ('batch_interval_seconds', 'payment_batch_interval_ms')
     `);
     configResult.rows.forEach(row => {
       const interval = parseInt(row.value);
       if (row.key === 'batch_interval_seconds') {
         mintQueueConfigDisplay = `✅ Enabled (batch every ${interval}s)`;
-      } else if (row.key === 'payment_batch_interval_seconds') {
-        paymentQueueConfigDisplay = `✅ Enabled (batch every ${interval}s)`;
+      } else if (row.key === 'payment_batch_interval_ms') {
+        paymentQueueConfigDisplay = `✅ Enabled (batch every ${interval}ms)`;
       }
     });
   } catch (e) {

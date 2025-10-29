@@ -1,12 +1,13 @@
 import { PublicClient } from "viem";
 
 /**
- * Nonce Manager for safe concurrent transaction handling
+ * Nonce Manager for safe serial transaction handling
  * Manages nonce state for a single wallet to prevent conflicts
+ * Designed for SERIAL processing (one tx at a time)
  */
 export class NonceManager {
   private currentNonce: bigint | null = null;
-  private pendingNonces: Set<bigint> = new Set();
+  private lastUsedNonce: bigint | null = null;
   private readonly walletAddress: `0x${string}`;
   private readonly publicClient: PublicClient;
   private syncInProgress: boolean = false;
@@ -25,7 +26,8 @@ export class NonceManager {
   }
 
   /**
-   * Sync nonce from chain (includes pending transactions)
+   * Sync nonce from chain
+   * Uses 'latest' block to get confirmed nonce, avoiding pending tx issues
    */
   async syncFromChain(): Promise<void> {
     if (this.syncInProgress) {
@@ -38,54 +40,54 @@ export class NonceManager {
 
     this.syncInProgress = true;
     try {
+      // Use 'latest' instead of 'pending' to avoid issues with stuck transactions
       const nonce = await this.publicClient.getTransactionCount({
         address: this.walletAddress,
-        blockTag: 'pending', // Include pending transactions
+        blockTag: 'latest',
       });
       
       this.currentNonce = BigInt(nonce);
-      this.pendingNonces.clear();
+      console.log(`🔄 Synced nonce from chain: ${this.currentNonce}`);
     } finally {
       this.syncInProgress = false;
     }
   }
 
   /**
-   * Get next available nonce
-   * Returns the nonce and marks it as pending
+   * Get next available nonce for serial transaction processing
+   * Simply returns and increments the current nonce
    */
   async getNextNonce(): Promise<number> {
     if (this.currentNonce === null) {
       await this.initialize();
     }
 
-    // If too many pending nonces, sync from chain first
-    if (this.pendingNonces.size > 10) {
-      await this.syncFromChain();
-    }
-
     const nonce = this.currentNonce!;
-    this.pendingNonces.add(nonce);
+    this.lastUsedNonce = nonce;
     this.currentNonce = nonce + 1n;
 
+    console.log(`➡️  Assigned nonce: ${nonce}`);
     return Number(nonce);
   }
 
   /**
    * Mark nonce as confirmed (transaction succeeded)
+   * No action needed for serial processing, nonce already incremented
    */
   confirmNonce(nonce: number): void {
-    this.pendingNonces.delete(BigInt(nonce));
+    console.log(`✅ Confirmed nonce: ${nonce}`);
+    // For serial processing, no action needed
   }
 
   /**
-   * Mark nonce as failed and resync from chain
-   * Called when a transaction fails or is replaced
+   * Handle failed transaction - resync from chain to get accurate state
+   * Critical for recovering from failed transactions
    */
   async handleFailedNonce(nonce: number): Promise<void> {
-    this.pendingNonces.delete(BigInt(nonce));
+    console.log(`⚠️  Failed nonce: ${nonce}, resyncing from chain...`);
     
     // Resync from chain to get accurate state
+    // This ensures we don't skip nonces or reuse failed ones
     await this.syncFromChain();
   }
 
@@ -95,8 +97,7 @@ export class NonceManager {
   getState() {
     return {
       currentNonce: this.currentNonce?.toString(),
-      pendingCount: this.pendingNonces.size,
-      pendingNonces: Array.from(this.pendingNonces).map(n => n.toString()),
+      lastUsedNonce: this.lastUsedNonce?.toString(),
     };
   }
 }

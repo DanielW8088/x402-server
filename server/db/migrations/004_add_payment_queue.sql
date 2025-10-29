@@ -30,12 +30,12 @@ CREATE INDEX IF NOT EXISTS idx_payment_queue_id ON payment_queue(id);
 -- Index for payer lookup
 CREATE INDEX IF NOT EXISTS idx_payment_queue_payer ON payment_queue(payer);
 
--- Add payment batch interval setting (default 2 seconds)
+-- Add payment batch interval setting (default 2000ms = 2 seconds)
 INSERT INTO system_settings (key, value, description)
 VALUES (
-  'payment_batch_interval_seconds',
-  '2',
-  'Interval in seconds for processing payment queue batches (prevents nonce conflicts)'
+  'payment_batch_interval_ms',
+  '2000',
+  'Interval in milliseconds for processing payment queue batches (prevents nonce conflicts)'
 )
 ON CONFLICT (key) DO NOTHING;
 

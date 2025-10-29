@@ -41,7 +41,7 @@ export class PaymentQueueProcessor {
   private nonceManager: NonceManager;
   private processingInterval: NodeJS.Timeout | null = null;
   private isProcessing: boolean = false;
-  private batchIntervalSeconds: number = 2; // Process every 2 seconds
+  private batchIntervalMs: number = 2000; // Process every 2000ms (2 seconds)
   private onPaymentCompleted?: PaymentCompletedCallback;
 
   constructor(
@@ -71,10 +71,10 @@ export class PaymentQueueProcessor {
     // Get batch interval from database
     try {
       const result = await this.pool.query(`
-        SELECT value FROM system_settings WHERE key = 'payment_batch_interval_seconds'
+        SELECT value FROM system_settings WHERE key = 'payment_batch_interval_ms'
       `);
       if (result.rows.length > 0) {
-        this.batchIntervalSeconds = parseInt(result.rows[0].value);
+        this.batchIntervalMs = parseInt(result.rows[0].value);
       }
     } catch (err) {
       // Use default interval if setting not found
@@ -83,10 +83,10 @@ export class PaymentQueueProcessor {
     // Start processing loop
     this.processingInterval = setInterval(
       () => this.processBatch(),
-      this.batchIntervalSeconds * 1000
+      this.batchIntervalMs
     );
 
-    console.log(`✅ PaymentQueueProcessor started (batch every ${this.batchIntervalSeconds}s)`);
+    console.log(`✅ PaymentQueueProcessor started (batch every ${this.batchIntervalMs}ms)`);
   }
 
   /**
@@ -153,7 +153,8 @@ export class PaymentQueueProcessor {
   }
 
   /**
-   * Process a batch of pending payments (serially)
+   * Process a batch of pending payments (serially, one at a time)
+   * Using LIMIT 1 to ensure strict serial processing and avoid nonce issues
    */
   private async processBatch(): Promise<void> {
     if (this.isProcessing) {
@@ -163,16 +164,17 @@ export class PaymentQueueProcessor {
     this.isProcessing = true;
 
     try {
-      // Get pending payments (ordered by creation time)
+      // Get ONE pending payment (oldest first)
+      // Process one at a time to ensure nonce consistency
       const result = await this.pool.query(
         `SELECT * FROM payment_queue 
          WHERE status = 'pending' 
          ORDER BY created_at ASC 
-         LIMIT 10`
+         LIMIT 1`
       );
 
-      for (const row of result.rows) {
-        await this.processPayment(row);
+      if (result.rows.length > 0) {
+        await this.processPayment(result.rows[0]);
       }
     } catch (error: any) {
       console.error('❌ Payment batch processing error:', error.message);
@@ -187,6 +189,7 @@ export class PaymentQueueProcessor {
   private async processPayment(row: any): Promise<void> {
     const paymentId = row.id;
     const authorization = row.authorization;
+    let nonce: number | null = null;
 
     try {
       // Mark as processing
@@ -196,7 +199,7 @@ export class PaymentQueueProcessor {
       );
 
       // Get nonce from manager
-      const nonce = await this.nonceManager.getNextNonce();
+      nonce = await this.nonceManager.getNextNonce();
 
       // Parse signature
       const sig = authorization.signature.startsWith('0x')
@@ -289,10 +292,9 @@ export class PaymentQueueProcessor {
     } catch (error: any) {
       console.error(`❌ Payment failed: ${paymentId}`, error.message);
 
-      // Handle failed nonce
-      const state = this.nonceManager.getState();
-      if (state.currentNonce) {
-        await this.nonceManager.handleFailedNonce(Number(state.currentNonce) - 1);
+      // Handle failed nonce (only if we got a nonce)
+      if (nonce !== null) {
+        await this.nonceManager.handleFailedNonce(nonce);
       }
 
       // Mark as failed
