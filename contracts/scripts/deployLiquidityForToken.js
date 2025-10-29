@@ -9,7 +9,7 @@ async function main() {
   console.log("Using signer:", await signer.getAddress());
 
   // === addresses ===
-  const LAUNCH_TOOL = "0xB90DEBdD2bFcE5823eE4E3D52eE56d8773a1EA17"; // your deployed LaunchTool
+  const LAUNCH_TOOL = "0xA5fEEaDCf22f64a528378dA2677791acB782284c"; // your deployed LaunchTool
   const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // replace with actual USDC test token
   const TOKENB = "0xC9561C362E5706eB5c3c537d13f1E9949304638b"; // replace with your ERC20 token
   const FEE = 10000; // 1% pool
