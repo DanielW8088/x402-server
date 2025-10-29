@@ -1,19 +1,21 @@
 import { config } from "dotenv";
 import Database from "better-sqlite3";
+import axios from "axios";
 import { 
   createWalletClient, 
   http, 
   formatUnits, 
-  publicActions,
   parseUnits,
-  createPublicClient
+  createPublicClient,
+  parseAbi,
+  getAddress
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
-import { wrapFetchWithPayment } from "x402-fetch";
 import * as readline from "readline";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import { HDKey } from "@scure/bip32";
+import { randomBytes } from "crypto";
 
 config();
 
@@ -43,16 +45,16 @@ if (!tokenAddress) {
 const chain = network === "base-sepolia" ? baseSepolia : base;
 const usdcAddress = USDC_ADDRESSES[network];
 
-// USDC ABI (balanceOf only)
-const USDC_ABI = [
-  {
-    inputs: [{ name: "account", type: "address" }],
-    name: "balanceOf",
-    outputs: [{ name: "", type: "uint256" }],
-    stateMutability: "view",
-    type: "function",
-  },
-] as const;
+// RPC URL configuration
+const rpcUrl = network === "base-sepolia" 
+  ? (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org")
+  : (process.env.BASE_RPC_URL || "https://mainnet.base.org");
+
+// USDC ABI
+const USDC_ABI = parseAbi([
+  "function balanceOf(address account) view returns (uint256)",
+  "function nonces(address owner) view returns (uint256)",
+]);
 
 // Database setup
 const db = new Database("wallets.db");
@@ -126,7 +128,7 @@ async function fetchAllBalances() {
   
   const publicClient = createPublicClient({
     chain,
-    transport: http(),
+    transport: http(rpcUrl),
   });
 
   const wallets = db.prepare("SELECT id, address FROM wallets").all() as any[];
@@ -181,6 +183,72 @@ function showStats() {
 }
 
 /**
+ * Create EIP-3009 authorization signature for USDC transferWithAuthorization
+ */
+async function createTransferAuthorization(
+  walletClient: any,
+  account: any,
+  from: `0x${string}`,
+  to: `0x${string}`,
+  value: bigint,
+  validAfter: bigint = 0n,
+  validBefore: bigint = BigInt(Math.floor(Date.now() / 1000) + 3600) // 1 hour validity
+): Promise<any> {
+  // Generate random nonce
+  const nonce = `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
+  
+  // USDC domain (EIP-712)
+  // CRITICAL: Base Sepolia USDC name is "USDC", Base Mainnet is "USD Coin"
+  const usdcName = network === 'base-sepolia' ? 'USDC' : 'USD Coin';
+  const domain = {
+    name: usdcName,
+    version: '2',
+    chainId: chain.id,
+    verifyingContract: usdcAddress,
+  };
+
+  // EIP-712 typed data
+  const types = {
+    TransferWithAuthorization: [
+      { name: 'from', type: 'address' },
+      { name: 'to', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'validAfter', type: 'uint256' },
+      { name: 'validBefore', type: 'uint256' },
+      { name: 'nonce', type: 'bytes32' },
+    ],
+  };
+
+  const message = {
+    from,
+    to,
+    value,
+    validAfter,
+    validBefore,
+    nonce,
+  };
+
+  // Sign typed data
+  const signature = await walletClient.signTypedData({
+    account,
+    domain,
+    types,
+    primaryType: 'TransferWithAuthorization',
+    message,
+  });
+
+  return {
+    from: getAddress(from),
+    to: getAddress(to),
+    value: value.toString(),
+    validAfter: validAfter.toString(),
+    validBefore: validBefore.toString(),
+    nonce,
+    signature,
+  };
+}
+
+/**
  * Check token price and payment info
  */
 async function checkTokenPrice() {
@@ -189,7 +257,6 @@ async function checkTokenPrice() {
   console.log(`   Token: ${tokenAddress}`);
   
   try {
-    const axios = (await import("axios")).default;
     const response = await axios.get(`${serverUrl}/api/tokens/${tokenAddress}`);
     const tokenInfo = response.data;
     
@@ -229,10 +296,10 @@ async function checkTokenPrice() {
 }
 
 /**
- * Test x402 payment flow with a single mint
+ * Test traditional EIP-3009 payment flow with a single mint
  */
-async function testX402Flow(walletId: number) {
-  console.log("\n🧪 Testing x402 Payment Flow:");
+async function testTraditionalFlow(walletId: number) {
+  console.log("\n🧪 Testing Traditional EIP-3009 Payment Flow:");
   console.log(`   Using wallet ID: ${walletId}`);
   
   const wallet = db.prepare("SELECT address, private_key FROM wallets WHERE id = ?").get(walletId) as any;
@@ -249,70 +316,51 @@ async function testX402Flow(walletId: number) {
     const walletClient = createWalletClient({
       account,
       chain,
-      transport: http(),
-    }).extend(publicActions);
-
-    console.log("\n   Step 1: Making initial request (should get 402)...");
-    
-    // First request without payment
-    const axios = (await import("axios")).default;
-    try {
-      const testResponse = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
-        payer: account.address,
-      });
-      console.log(`   ⚠️  Got ${testResponse.status} directly (expected 402 first)`);
-      console.log(`   Response:`, JSON.stringify(testResponse.data, null, 2));
-    } catch (error: any) {
-      if (error.response?.status === 402) {
-        console.log(`   ✅ Got 402 Payment Required as expected`);
-        console.log(`   Headers:`, error.response.headers);
-        
-        if (error.response.headers['x-payment']) {
-          console.log(`   ✅ Has X-Payment header`);
-          console.log(`   Payment info:`, error.response.headers['x-payment']);
-        } else {
-          console.log(`   ❌ Missing X-Payment header!`);
-        }
-      } else {
-        console.log(`   ❌ Got ${error.response?.status || 'error'} instead of 402`);
-        console.log(`   Response:`, error.response?.data);
-      }
-    }
-
-    console.log("\n   Step 2: Using x402-fetch with payment...");
-    const fetchWithPayment = wrapFetchWithPayment(
-      fetch,
-      walletClient as any,
-      BigInt(1_500_000)
-    );
-
-    const response = await fetchWithPayment(`${serverUrl}/api/mint/${tokenAddress}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        payer: account.address,
-      }),
+      transport: http(rpcUrl),
     });
 
-    console.log(`   Response status: ${response.status}`);
-    console.log(`   Response headers:`, Object.fromEntries(response.headers.entries()));
+    console.log("\n   Step 1: Fetching token info...");
+    const response = await axios.get(`${serverUrl}/api/tokens/${tokenAddress}`);
+    const tokenInfo = response.data;
+    
+    console.log(`   Token: ${tokenInfo.name} (${tokenInfo.symbol})`);
+    console.log(`   Price: ${tokenInfo.price}`);
+    console.log(`   Payment address: ${tokenInfo.paymentAddress}`);
 
-    if (response.ok) {
-      const result = await response.json();
-      console.log(`   ✅ SUCCESS!`);
-      console.log(`   Result:`, JSON.stringify(result, null, 2));
-    } else {
-      const errorText = await response.text();
-      console.log(`   ❌ FAILED`);
-      console.log(`   Error:`, errorText);
-    }
+    console.log("\n   Step 2: Creating EIP-3009 authorization...");
+    
+    // Parse price
+    const priceMatch = tokenInfo.price.match(/[\d.]+/);
+    const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 1;
+    const paymentAmount = BigInt(Math.floor(pricePerMint * 1e6)); // USDC 6 decimals
+    
+    console.log(`   Payment amount: ${formatUnits(paymentAmount, 6)} USDC`);
+    
+    // Create authorization
+    const authorization = await createTransferAuthorization(
+      walletClient,
+      account,
+      account.address,
+      tokenInfo.paymentAddress as `0x${string}`,
+      paymentAmount
+    );
+    
+    console.log(`   ✅ Authorization created`);
+
+    console.log("\n   Step 3: Sending mint request with authorization...");
+    const mintResponse = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
+      payer: account.address,
+      authorization: authorization,
+    });
+
+    console.log(`   Response status: ${mintResponse.status}`);
+    console.log(`   ✅ SUCCESS!`);
+    console.log(`   Result:`, JSON.stringify(mintResponse.data, null, 2));
 
   } catch (error: any) {
     console.error(`\n   ❌ Error: ${error.message}`);
     if (error.response) {
-      console.error(`   Response:`, error.response.data);
+      console.error(`   Response (${error.response.status}):`, error.response.data);
     }
   }
 }
@@ -325,7 +373,7 @@ async function compareBalances(walletIds: number[]) {
   
   const publicClient = createPublicClient({
     chain,
-    transport: http(),
+    transport: http(rpcUrl),
   });
 
   for (const id of walletIds) {
@@ -403,6 +451,7 @@ function listWallets(options: { limit?: number; offset?: number; minBalance?: st
 
 /**
  * Concurrent batch mint tokens with automatic wallet rotation
+ * Uses database balance only (no automatic refresh)
  */
 async function batchMintConcurrent(
   startId: number,
@@ -420,8 +469,20 @@ async function batchMintConcurrent(
   console.log(`   Min USDC balance: ${formatUnits(BigInt(minUsdcBalance), 6)} USDC`);
   console.log(`   Token: ${tokenAddress}`);
   console.log(`   Network: ${network}`);
+  
+  // Get token price to calculate max mints per wallet
+  console.log(`\n📋 Fetching token price...`);
+  const tokenInfoResponse = await axios.get(`${serverUrl}/api/tokens/${tokenAddress}`);
+  const tokenInfo = tokenInfoResponse.data;
+  const priceMatch = tokenInfo.price.match(/[\d.]+/);
+  const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 1;
+  const pricePerMintWei = BigInt(Math.floor(pricePerMint * 1e6)); // USDC 6 decimals
+  
+  console.log(`   Token: ${tokenInfo.name} (${tokenInfo.symbol})`);
+  console.log(`   Price per mint: ${pricePerMint} USDC`);
+  console.log(`   Payment address: ${tokenInfo.paymentAddress}`);
 
-  // Get all available wallets
+  // Get all wallets and calculate max mints for each
   const allWallets = db.prepare(
     "SELECT id, address_index, address, private_key, usdc_balance FROM wallets WHERE id >= ? AND id <= ? ORDER BY id"
   ).all(startId, endId) as any[];
@@ -431,17 +492,47 @@ async function batchMintConcurrent(
     return;
   }
 
-  // Filter wallets with sufficient balance
-  const availableWallets = allWallets.filter(w => 
-    BigInt(w.usdc_balance || 0) >= BigInt(minUsdcBalance)
-  );
+  // Calculate max mints per wallet based on database balance
+  const walletsWithMintInfo = allWallets.map(w => {
+    const balance = BigInt(w.usdc_balance || 0);
+    const maxMints = balance > 0n ? Number(balance / pricePerMintWei) : 0;
+    return {
+      ...w,
+      balance,
+      maxMints,
+      currentMints: 0, // Track how many times this wallet has minted
+    };
+  });
 
-  console.log(`\n   Total wallets: ${allWallets.length}`);
-  console.log(`   Wallets with sufficient balance: ${availableWallets.length}`);
+  // Filter out wallets with 0 balance
+  const availableWallets = walletsWithMintInfo.filter(w => w.maxMints > 0);
+
+  console.log(`\n📊 Wallet Balance Summary:`);
+  console.log(`   Total wallets in range: ${allWallets.length}`);
+  console.log(`   Wallets with balance > 0: ${availableWallets.length}`);
+  console.log(`   Wallets with balance = 0: ${allWallets.length - availableWallets.length} (skipped)`);
+  
+  // Show top 10 wallets
+  console.log(`\n   Top wallets by balance:`);
+  const sortedByBalance = [...availableWallets].sort((a, b) => Number(b.balance - a.balance));
+  for (let i = 0; i < Math.min(10, sortedByBalance.length); i++) {
+    const w = sortedByBalance[i];
+    console.log(`   #${w.id}: ${formatUnits(w.balance, 6)} USDC → max ${w.maxMints} mints`);
+  }
   
   if (availableWallets.length === 0) {
-    console.error("❌ No wallets with sufficient USDC balance");
+    console.error("\n❌ No wallets with balance > 0");
+    console.error("💡 Run 'npm run batch fetch-balances' to update wallet balances");
     return;
+  }
+  
+  // Calculate total possible mints
+  const totalPossibleMints = availableWallets.reduce((sum, w) => sum + w.maxMints, 0);
+  console.log(`\n   Total possible mints: ${totalPossibleMints}`);
+  
+  if (totalMints > totalPossibleMints) {
+    console.warn(`\n⚠️  Warning: Requested ${totalMints} mints but only ${totalPossibleMints} possible`);
+    console.warn(`   Will mint ${totalPossibleMints} times instead`);
   }
 
   // Confirm
@@ -468,51 +559,81 @@ async function batchMintConcurrent(
     successCount: 0,
     failCount: 0,
     completedMints: 0,
-    walletIndex: 0,
-    walletMintCounts: new Map<number, number>(),
     walletFailCounts: new Map<number, number>(),
   };
+
+  // Assign wallets to workers (each worker gets exclusive wallets)
+  const walletsPerWorker = Math.ceil(availableWallets.length / concurrency);
+  const workerWallets: typeof availableWallets[] = [];
+  
+  for (let i = 0; i < concurrency; i++) {
+    const start = i * walletsPerWorker;
+    const end = Math.min((i + 1) * walletsPerWorker, availableWallets.length);
+    workerWallets.push(availableWallets.slice(start, end));
+  }
+
+  console.log(`\n📦 Worker wallet allocation:`);
+  for (let i = 0; i < workerWallets.length; i++) {
+    if (workerWallets[i].length > 0) {
+      const maxMintsForWorker = workerWallets[i].reduce((sum, w) => sum + w.maxMints, 0);
+      console.log(`   Worker ${i}: ${workerWallets[i].length} wallets, max ${maxMintsForWorker} mints`);
+    }
+  }
 
   // Create worker pool
   const workers: Promise<void>[] = [];
   
   for (let workerId = 0; workerId < concurrency; workerId++) {
-    const worker = async () => {
-      while (state.completedMints < totalMints) {
-        // Get next available wallet
-        if (state.walletIndex >= availableWallets.length) {
-          // Refresh wallet list (fetch balances)
-          console.log(`\n🔄 Worker ${workerId}: Refreshing wallet balances...`);
-          await fetchWalletBalances(availableWallets.map(w => w.id));
-          
-          // Reset to wallets with sufficient balance
-          state.walletIndex = 0;
-          const refreshedWallets = availableWallets.filter(w => {
-            const wallet = db.prepare("SELECT usdc_balance FROM wallets WHERE id = ?").get(w.id) as any;
-            return BigInt(wallet.usdc_balance || 0) >= BigInt(minUsdcBalance);
-          });
+    const myWallets = workerWallets[workerId];
+    if (!myWallets || myWallets.length === 0) {
+      console.log(`   Worker ${workerId}: No wallets assigned, skipping`);
+      continue;
+    }
 
-          if (refreshedWallets.length === 0) {
-            console.log(`\n❌ Worker ${workerId}: No more wallets with sufficient balance`);
-            break;
-          }
-          
-          availableWallets.splice(0, availableWallets.length, ...refreshedWallets);
+    const worker = async () => {
+      let walletIndex = 0;
+      const exhaustedWallets = new Set<number>();
+
+      while (state.completedMints < totalMints) {
+        // All my wallets exhausted?
+        if (exhaustedWallets.size >= myWallets.length) {
+          console.log(`\n⚠️  Worker ${workerId}: All assigned wallets exhausted`);
+          break;
         }
 
-        const wallet = availableWallets[state.walletIndex];
-        state.walletIndex++;
+        // Get next wallet (circular rotation within my wallets)
+        if (walletIndex >= myWallets.length) {
+          walletIndex = 0;
+        }
 
-        const mintCount = state.walletMintCounts.get(wallet.id) || 0;
+        const wallet = myWallets[walletIndex];
+        walletIndex++;
+
+        // Skip exhausted wallets
+        if (exhaustedWallets.has(wallet.id)) {
+          continue;
+        }
+
+        // Skip if wallet has too many failures
         const walletFailCount = state.walletFailCounts.get(wallet.id) || 0;
-
-        // Skip if this wallet has too many failures
         if (walletFailCount >= 3) {
+          console.log(`\n⚠️  Worker ${workerId}: Wallet #${wallet.id} - too many failures, skipping`);
+          exhaustedWallets.add(wallet.id);
+          continue;
+        }
+
+        // Check if wallet reached max mints
+        if (wallet.currentMints >= wallet.maxMints) {
+          console.log(`\n✅ Worker ${workerId}: Wallet #${wallet.id} - reached max mints (${wallet.maxMints})`);
+          exhaustedWallets.add(wallet.id);
           continue;
         }
 
         try {
-          console.log(`\n💼 Worker ${workerId}: Using wallet #${wallet.id} (${wallet.address.slice(0, 10)}...)`);
+          const remainingMints = wallet.maxMints - wallet.currentMints;
+          console.log(`\n💼 Worker ${workerId}: Wallet #${wallet.id} (${wallet.address.slice(0, 10)}...)`);
+          console.log(`   Balance: ${formatUnits(wallet.balance, 6)} USDC`);
+          console.log(`   Mints: ${wallet.currentMints}/${wallet.maxMints} (${remainingMints} remaining)`);
           
           // Create account from stored private key
           const account = privateKeyToAccount(wallet.private_key as `0x${string}`);
@@ -520,43 +641,44 @@ async function batchMintConcurrent(
           const walletClient = createWalletClient({
             account,
             chain,
-            transport: http(),
-          }).extend(publicActions);
+            transport: http(rpcUrl),
+          });
 
-          const fetchWithPayment = wrapFetchWithPayment(
-            fetch,
-            walletClient as any,
-            BigInt(1_500_000) // 1.5 USDC max per mint
-          );
-
-          console.log(`   💳 Preparing x402 payment for ${account.address}...`);
+          console.log(`   💳 Creating EIP-3009 authorization...`);
           
-          const response = await fetchWithPayment(`${serverUrl}/api/mint/${tokenAddress}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              payer: account.address,
-            }),
+          // Create authorization (reuse token info from earlier)
+          const authorization = await createTransferAuthorization(
+            walletClient,
+            account,
+            account.address,
+            tokenInfo.paymentAddress as `0x${string}`,
+            pricePerMintWei
+          );
+          
+          console.log(`   📤 Sending mint request...`);
+          
+          const response = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
+            payer: account.address,
+            authorization: authorization,
           });
           
           console.log(`   📨 Response status: ${response.status}`);
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`   ❌ Worker ${workerId}: Failed - ${errorText.slice(0, 100)}`);
-            state.failCount++;
-            state.walletFailCounts.set(wallet.id, (state.walletFailCounts.get(wallet.id) || 0) + 1);
+          const result = response.data;
+          if (result.queueId) {
+            console.log(`   ✅ Worker ${workerId}: Queued ${result.queueId}`);
           } else {
-            const result: any = await response.json();
-            if (result.queueId) {
-              console.log(`   ✅ Worker ${workerId}: Queued ${result.queueId}`);
-            } else {
-              console.log(`   ✅ Worker ${workerId}: Minted ${result.mintTxHash?.slice(0, 10) || 'success'}`);
-            }
-            state.successCount++;
-            state.walletMintCounts.set(wallet.id, mintCount + 1);
+            console.log(`   ✅ Worker ${workerId}: Minted ${result.mintTxHash?.slice(0, 10) || 'success'}`);
+          }
+          
+          // Increment wallet's mint count
+          wallet.currentMints++;
+          state.successCount++;
+          
+          // Check if wallet is now exhausted
+          if (wallet.currentMints >= wallet.maxMints) {
+            console.log(`   🎯 Worker ${workerId}: Wallet #${wallet.id} - all mints used (${wallet.maxMints}/${wallet.maxMints})`);
+            exhaustedWallets.add(wallet.id);
           }
 
           state.completedMints++;
@@ -568,7 +690,11 @@ async function batchMintConcurrent(
           }
 
         } catch (error: any) {
-          console.error(`   ❌ Worker ${workerId}: Error - ${error.message}`);
+          if (error.response) {
+            console.error(`   ❌ Worker ${workerId}: Error - ${error.response.status} - ${JSON.stringify(error.response.data)}`);
+          } else {
+            console.error(`   ❌ Worker ${workerId}: Error - ${error.message}`);
+          }
           state.failCount++;
           state.walletFailCounts.set(wallet.id, (state.walletFailCounts.get(wallet.id) || 0) + 1);
           state.completedMints++;
@@ -587,7 +713,19 @@ async function batchMintConcurrent(
   console.log(`   Success: ${state.successCount}`);
   console.log(`   Failed: ${state.failCount}`);
   console.log(`   Total: ${state.completedMints}`);
-  console.log(`   Wallets used: ${state.walletMintCounts.size}`);
+  
+  const usedWallets = availableWallets.filter(w => w.currentMints > 0);
+  const exhaustedCount = availableWallets.filter(w => w.currentMints >= w.maxMints).length;
+  
+  console.log(`   Wallets used: ${usedWallets.length}`);
+  console.log(`   Wallets exhausted: ${exhaustedCount}`);
+  
+  // Show wallet usage summary
+  console.log(`\n📊 Wallet Usage Summary:`);
+  for (const w of usedWallets) {
+    const percentage = (w.currentMints / w.maxMints * 100).toFixed(1);
+    console.log(`   #${w.id}: ${w.currentMints}/${w.maxMints} mints (${percentage}%)`);
+  }
 }
 
 /**
@@ -596,7 +734,7 @@ async function batchMintConcurrent(
 async function fetchWalletBalances(walletIds: number[]) {
   const publicClient = createPublicClient({
     chain,
-    transport: http(),
+    transport: http(rpcUrl),
   });
 
   const update = db.prepare(
@@ -624,7 +762,8 @@ async function fetchWalletBalances(walletIds: number[]) {
 }
 
 /**
- * Batch mint tokens (original sequential version)
+ * Batch mint tokens (sequential version)
+ * Uses database balance only (no automatic refresh)
  */
 async function batchMint(
   startId: number,
@@ -634,10 +773,21 @@ async function batchMint(
 ) {
   console.log(`\n🚀 Batch Mint Configuration:`);
   console.log(`   Wallet IDs: ${startId} to ${endId}`);
-  console.log(`   Mints per wallet: ${times}`);
+  console.log(`   Mints per wallet: ${times} (requested)`);
   console.log(`   Delay between mints: ${delayMs}ms`);
   console.log(`   Token: ${tokenAddress}`);
   console.log(`   Network: ${network}`);
+  
+  // Get token price to calculate max mints per wallet
+  console.log(`\n📋 Fetching token price...`);
+  const tokenInfoResponse = await axios.get(`${serverUrl}/api/tokens/${tokenAddress}`);
+  const tokenInfo = tokenInfoResponse.data;
+  const priceMatch = tokenInfo.price.match(/[\d.]+/);
+  const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 1;
+  const pricePerMintWei = BigInt(Math.floor(pricePerMint * 1e6)); // USDC 6 decimals
+  
+  console.log(`   Token: ${tokenInfo.name} (${tokenInfo.symbol})`);
+  console.log(`   Price per mint: ${pricePerMint} USDC`);
 
   // Get wallets in range
   const wallets = db.prepare(
@@ -649,7 +799,34 @@ async function batchMint(
     return;
   }
 
-  console.log(`\n   Found ${wallets.length} wallets to mint from`);
+  // Calculate max mints for each wallet
+  const walletsWithInfo = wallets.map(w => {
+    const balance = BigInt(w.usdc_balance || 0);
+    const maxMints = balance > 0n ? Number(balance / pricePerMintWei) : 0;
+    return { ...w, balance, maxMints };
+  });
+
+  // Filter out zero balance wallets
+  const availableWallets = walletsWithInfo.filter(w => w.maxMints > 0);
+
+  console.log(`\n📊 Wallet Summary:`);
+  console.log(`   Total wallets: ${wallets.length}`);
+  console.log(`   Wallets with balance: ${availableWallets.length}`);
+  console.log(`   Wallets with zero balance: ${wallets.length - availableWallets.length} (will skip)`);
+  
+  if (availableWallets.length === 0) {
+    console.error("\n❌ No wallets with balance > 0");
+    console.error("💡 Run 'npm run batch fetch-balances' to update wallet balances");
+    return;
+  }
+  
+  // Show wallet details
+  console.log(`\n   Wallets to use:`);
+  for (const w of availableWallets) {
+    const actualMints = Math.min(times, w.maxMints);
+    const status = actualMints < times ? ` (limited by balance)` : '';
+    console.log(`   #${w.id}: ${formatUnits(w.balance, 6)} USDC → ${actualMints}/${times} mints${status}`);
+  }
   
   // Confirm
   const rl = readline.createInterface({
@@ -673,9 +850,20 @@ async function batchMint(
   let successCount = 0;
   let failCount = 0;
 
-  for (const wallet of wallets) {
+  for (const wallet of availableWallets) {
+    // Calculate actual mints (limited by balance)
+    const actualMints = Math.min(times, wallet.maxMints);
+    
     console.log(`\n📍 Wallet #${wallet.id} (${wallet.address})`);
-    console.log(`   Balance: ${formatUnits(BigInt(wallet.usdc_balance || 0), 6)} USDC`);
+    console.log(`   Balance: ${formatUnits(wallet.balance, 6)} USDC`);
+    console.log(`   Max mints: ${wallet.maxMints}`);
+    console.log(`   Will mint: ${actualMints} times`);
+
+    // Skip if zero balance (shouldn't happen after filter, but safety check)
+    if (actualMints === 0) {
+      console.log(`   ⏭️  Skipping (zero balance)`);
+      continue;
+    }
 
     // Create account from stored private key
     const account = privateKeyToAccount(wallet.private_key as `0x${string}`);
@@ -683,50 +871,46 @@ async function batchMint(
     const walletClient = createWalletClient({
       account,
       chain,
-      transport: http(),
-    }).extend(publicActions);
+      transport: http(rpcUrl),
+    });
 
-    const fetchWithPayment = wrapFetchWithPayment(
-      fetch,
-      walletClient as any,
-      BigInt(1_500_000) // 1.5 USDC max per mint
-    );
-
-    // Mint multiple times
-    for (let i = 1; i <= times; i++) {
+    // Mint actualMints times (limited by balance)
+    for (let i = 1; i <= actualMints; i++) {
       try {
-        console.log(`   Mint ${i}/${times}...`);
+        console.log(`   Mint ${i}/${actualMints}...`);
         
-        const response = await fetchWithPayment(`${serverUrl}/api/mint/${tokenAddress}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            payer: account.address,
-          }),
+        // Create authorization for each mint
+        const authorization = await createTransferAuthorization(
+          walletClient,
+          account,
+          account.address,
+          tokenInfo.paymentAddress as `0x${string}`,
+          pricePerMintWei
+        );
+        
+        const response = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
+          payer: account.address,
+          authorization: authorization,
         });
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`   ❌ Failed: ${response.status} - ${errorText}`);
-          failCount++;
+        const result = response.data;
+        if (result.queueId) {
+          console.log(`   ✅ Queued: ${result.queueId}`);
         } else {
-          const result: any = await response.json();
-          if (result.queueId) {
-            console.log(`   ✅ Queued: ${result.queueId}`);
-          } else {
-            console.log(`   ✅ Minted: ${result.mintTxHash || 'success'}`);
-          }
-          successCount++;
+          console.log(`   ✅ Minted: ${result.mintTxHash || 'success'}`);
         }
+        successCount++;
 
         // Wait between mints
-        if (i < times || wallet.id < endId) {
+        if (i < actualMints || wallet.id < availableWallets[availableWallets.length - 1].id) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
       } catch (error: any) {
-        console.error(`   ❌ Error: ${error.message}`);
+        if (error.response) {
+          console.error(`   ❌ Failed: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
+        } else {
+          console.error(`   ❌ Error: ${error.message}`);
+        }
         failCount++;
       }
     }
@@ -748,6 +932,9 @@ async function main() {
 
   console.log("🔧 x402 Batch Mint Tool");
   console.log("=".repeat(50));
+  console.log(`Network: ${network}`);
+  console.log(`RPC URL: ${rpcUrl}`);
+  console.log(`Token: ${tokenAddress}`);
 
   if (!command) {
     console.log("\nCommands:");
@@ -756,7 +943,7 @@ async function main() {
     console.log("  stats                     Show wallet statistics");
     console.log("  list [limit] [offset]     List wallets");
     console.log("  check-price               Check token price and payment info");
-    console.log("  test-x402 <wallet_id>     Test x402 payment flow with one wallet");
+    console.log("  test-trad <wallet_id>     Test traditional EIP-3009 flow with one wallet");
     console.log("  compare <id1> <id2> ...   Compare DB vs chain balances");
     console.log("  mint <start> <end> <times> [delay]  Sequential batch mint");
     console.log("                            start: start wallet ID");
@@ -773,7 +960,7 @@ async function main() {
     console.log("  npm run batch generate 1000");
     console.log("  npm run batch fetch-balances");
     console.log("  npm run batch check-price");
-    console.log("  npm run batch test-x402 1");
+    console.log("  npm run batch test-trad 1");
     console.log("  npm run batch compare 1 2 3");
     console.log("  npm run batch mint 1 10 5 2000");
     console.log("  npm run batch concurrent 1 100 1000 10 1000");
@@ -805,14 +992,14 @@ async function main() {
         break;
       }
 
-      case "test-x402": {
+      case "test-trad": {
         const walletId = parseInt(args[1]);
         if (isNaN(walletId)) {
           console.error("❌ Please provide a wallet ID");
-          console.error("Usage: test-x402 <wallet_id>");
+          console.error("Usage: test-trad <wallet_id>");
           process.exit(1);
         }
-        await testX402Flow(walletId);
+        await testTraditionalFlow(walletId);
         break;
       }
 

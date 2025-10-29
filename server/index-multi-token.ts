@@ -17,6 +17,7 @@ import {
 } from "./services/tokenDeployer.js";
 import { initDatabase } from "./db/init.js";
 import { MintQueueProcessor } from "./queue/processor.js";
+import { PaymentQueueProcessor } from "./queue/payment-processor.js";
 import { verify, settle } from "x402/facilitator";
 import { facilitator } from "@coinbase/x402";
 
@@ -227,6 +228,86 @@ const queueProcessor = new MintQueueProcessor(
   pool,
   minterWalletClient,  // Use MINTER wallet, not SERVER wallet
   publicClient
+);
+
+// Initialize payment queue processor for serial payment processing
+// Use SERVER wallet for receiving USDC payments (prevents nonce conflicts)
+const paymentQueueProcessor = new PaymentQueueProcessor(
+  pool,
+  serverWalletClient,  // Use SERVER wallet for payment transactions
+  publicClient,
+  chain,
+  serverAccount,
+  // Callback for handling payment completion (e.g., trigger deployment or mint)
+  async (item, txHash) => {
+    if (item.payment_type === 'deploy' && item.metadata) {
+      // Payment for deployment completed, now deploy the token
+      const deployConfig = item.metadata.deployConfig;
+      
+      try {
+        // Deploy token
+        const deployResult = await deployToken(deployConfig);
+        
+        // Save to database
+        const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
+        
+        console.log(`✅ Token deployed after payment: ${savedToken.address}`);
+        
+        // Return deployment result
+        return {
+          success: true,
+          tokenAddress: savedToken.address,
+          deployTxHash: savedToken.deploy_tx_hash,
+          blockNumber: savedToken.deploy_block_number,
+        };
+      } catch (error: any) {
+        console.error(`❌ Deployment failed after payment:`, error.message);
+        throw error;
+      }
+    }
+    
+    if (item.payment_type === 'mint' && item.metadata) {
+      // Payment for mint completed, add mints to mint queue
+      const { quantity } = item.metadata;
+      const tokenAddress = item.token_address!;
+      const payer = item.payer;
+      
+      try {
+        const queueIds: string[] = [];
+        const timestamp = Date.now();
+        
+        // Generate mint tx hashes and add to queue
+        for (let i = 0; i < quantity; i++) {
+          const txHashBytes32 = generateMintTxHash(payer, timestamp + i, tokenAddress);
+          
+          // Add to mint queue
+          const queueId = await queueProcessor.addToQueue(
+            payer,
+            txHashBytes32,
+            i === 0 ? txHash : undefined, // Only attach payment tx to first mint
+            item.authorization,
+            'traditional',
+            tokenAddress
+          );
+          
+          queueIds.push(queueId);
+        }
+        
+        console.log(`✅ Added ${quantity} mints to queue after payment: ${queueIds.join(', ')}`);
+        
+        return {
+          success: true,
+          queueIds,
+          quantity,
+        };
+      } catch (error: any) {
+        console.error(`❌ Failed to queue mints after payment:`, error.message);
+        throw error;
+      }
+    }
+    
+    return null;
+  }
 );
 
 // Note: LP deployment is now handled by a separate standalone service
@@ -611,79 +692,28 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
     
-    // Process deployment fee payment
+    // Verify authorization is to our address and for correct amount
     const usdcAddress = network === 'base-sepolia' 
       ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
       : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
 
-    try {
-      // Verify authorization is to our address and for correct amount
-      if (getAddress(authorization.to) !== getAddress(account.address)) {
-        return res.status(400).json({
-          error: "Invalid payment recipient",
-          message: `Payment must be sent to ${account.address}`,
-        });
-      }
-
-      if (BigInt(authorization.value) !== DEPLOY_FEE_USDC) {
-        return res.status(400).json({
-          error: "Invalid payment amount",
-          message: `Payment must be exactly 10 USDC (${DEPLOY_FEE_USDC.toString()} wei)`,
-        });
-      }
-
-      // Execute transferWithAuthorization
-      const sig = authorization.signature.startsWith('0x') 
-        ? authorization.signature.slice(2) 
-        : authorization.signature;
-      
-      const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
-      const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
-      let v = parseInt(sig.slice(128, 130), 16);
-      
-      if (v === 0 || v === 1) v = v + 27;
-      
-      // EIP-1559 省钱模式
-      const block = await publicClient.getBlock();
-      const baseFeePerGas = block.baseFeePerGas || 100000000n;
-      const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
-      const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
-      
-      const paymentHash = await walletClient.writeContract({
-        address: usdcAddress,
-        abi: usdcAbi,
-        functionName: "transferWithAuthorization",
-        args: [
-          getAddress(authorization.from),
-          getAddress(authorization.to),
-          BigInt(authorization.value),
-          BigInt(authorization.validAfter),
-          BigInt(authorization.validBefore),
-          authorization.nonce as `0x${string}`,
-          v,
-          r,
-          s,
-        ],
-        gas: 150000n, // 降低 gas limit
-        maxFeePerGas,
-        maxPriorityFeePerGas,
-      });
-      
-      const paymentReceipt = await publicClient.waitForTransactionReceipt({ 
-        hash: paymentHash,
-        confirmations: 1,
-      });
-      
-      if (paymentReceipt.status !== "success") {
-        throw new Error("Payment transaction reverted");
-      }
-    } catch (error: any) {
+    if (getAddress(authorization.to) !== getAddress(account.address)) {
+      await client.query('ROLLBACK');
       return res.status(400).json({
-        error: "Payment failed",
-        message: error.message,
+        error: "Invalid payment recipient",
+        message: `Payment must be sent to ${account.address}`,
       });
     }
 
+    if (BigInt(authorization.value) !== DEPLOY_FEE_USDC) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: "Invalid payment amount",
+        message: `Payment must be exactly 10 USDC (${DEPLOY_FEE_USDC.toString()} wei)`,
+      });
+    }
+
+    // Create deployment config
     const deployConfig: TokenDeployConfig = {
       name,
       symbol,
@@ -693,48 +723,33 @@ app.post("/api/deploy", async (req, res) => {
       paymentToken: paymentToken === 'USDT' ? 'USDT' : 'USDC',
       network,
       deployer: normalizedDeployer,
-      excessRecipient: excessRecipient, // Pass the excess recipient
+      excessRecipient: excessRecipient,
       imageUrl: imageUrl || undefined,
       description: description || undefined,
     };
 
-    // Deploy token
-    const deployResult = await deployToken(deployConfig);
-
-    // Save to database
-    const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
+    // Add payment to queue (will trigger deployment after payment succeeds)
+    const paymentId = await paymentQueueProcessor.addToQueue(
+      'deploy',
+      authorization,
+      normalizedDeployer,
+      DEPLOY_FEE_USDC.toString(),
+      usdcAddress,
+      undefined, // No token address yet (will be created after deployment)
+      { deployConfig } // Store deployment config in metadata
+    );
 
     // Commit transaction and release lock
     await client.query('COMMIT');
 
-    // Cache will auto-expire after TTL (no manual invalidation needed)
-
-    // Calculate required vs total USDC
-    const pricePerMintUSDC = BigInt(price) * BigInt(10 ** 6);
-    const mintAmountWei = BigInt(mintAmount) * BigInt(10 ** 18);
-    const totalUserMint = mintAmountWei * BigInt(maxMintCount);
-    const poolSeedAmount = totalUserMint / BigInt(4);
-    const requiredUSDC = (poolSeedAmount * pricePerMintUSDC) / mintAmountWei;
-    const totalUSDC = pricePerMintUSDC * BigInt(maxMintCount);
-    const excessUSDC = totalUSDC - requiredUSDC;
-
-    return res.status(200).json({
+    // Return payment ID for status polling
+    return res.status(202).json({
       success: true,
-      token: {
-        address: savedToken.address,
-        name: savedToken.name,
-        symbol: savedToken.symbol,
-        deployTxHash: savedToken.deploy_tx_hash,
-        blockNumber: savedToken.deploy_block_number,
-        mintUrl: `${req.protocol}://${req.get('host')}/mint/${savedToken.address}`,
-        paymentInfo: {
-          paymentAddress: savedToken.address, // USDC should be sent to token contract
-          requiredUSDC: (Number(requiredUSDC) / 1e6).toFixed(2),
-          totalUSDC: (Number(totalUSDC) / 1e6).toFixed(2),
-          excessUSDC: (Number(excessUSDC) / 1e6).toFixed(2),
-          excessRecipient: excessRecipient || normalizedDeployer,
-        },
-      },
+      message: "Deployment payment queued. Token will be deployed after payment completes.",
+      paymentId,
+      paymentStatus: "pending",
+      statusUrl: `${req.protocol}://${req.get('host')}/api/payment/${paymentId}`,
+      estimatedSeconds: 5, // Rough estimate for payment processing
     });
   } catch (error: any) {
     // Rollback transaction and release lock
@@ -1193,57 +1208,35 @@ app.post("/api/mint/:address", async (req, res) => {
         });
       }
     
-      // Execute transferWithAuthorization (payment verification)
+      // Add payment to queue (serial processing to avoid nonce conflicts)
       try {
-        const sig = authorization.signature.startsWith('0x') 
-          ? authorization.signature.slice(2) 
-          : authorization.signature;
+        const paymentQueueId = await paymentQueueProcessor.addToQueue(
+          'mint',
+          authorization,
+          payer,
+          authorization.value,
+          paymentTokenAddress,
+          tokenAddress,
+          { quantity } // metadata
+        );
         
-        const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
-        const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
-        let v = parseInt(sig.slice(128, 130), 16);
+        console.log(`✅ Payment queued: ${paymentQueueId} for mint to ${payer}`);
         
-        if (v === 0 || v === 1) v = v + 27;
-        
-        // EIP-1559 省钱模式
-        const block = await publicClient.getBlock();
-        const baseFeePerGas = block.baseFeePerGas || 100000000n;
-        const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
-        const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
-        
-        const authHash = await walletClient.writeContract({
-          address: paymentTokenAddress,
-          abi: usdcAbi,
-          functionName: "transferWithAuthorization",
-          args: [
-            getAddress(authorization.from),
-            getAddress(authorization.to),
-            BigInt(authorization.value),
-            BigInt(authorization.validAfter),
-            BigInt(authorization.validBefore),
-            authorization.nonce as `0x${string}`,
-            v,
-            r,
-            s,
-          ],
-          gas: 150000n,
-          maxFeePerGas,
-          maxPriorityFeePerGas,
+        // For now, return immediately with payment queue ID
+        // The payment will be processed asynchronously
+        // Client should poll for status or wait for webhook
+        return res.status(202).json({
+          success: true,
+          paymentQueueId,
+          message: "Payment queued for processing",
+          payer,
+          quantity,
+          tokenAddress,
+          status: "payment_pending",
         });
-        
-        const authReceipt = await publicClient.waitForTransactionReceipt({ 
-          hash: authHash,
-          confirmations: 1,
-        });
-        
-        if (authReceipt.status !== "success") {
-          throw new Error("USDC transfer reverted");
-        }
-        
-        paymentTxHash = authHash;
       } catch (error: any) {
         return res.status(400).json({
-          error: "Payment verification failed",
+          error: "Failed to queue payment",
           message: error.message,
         });
       }
@@ -1355,6 +1348,70 @@ app.post("/api/mint/:address", async (req, res) => {
 });
 
 /**
+ * GET /api/payment/:paymentId - Get payment status
+ */
+app.get("/api/payment/:paymentId", async (req, res) => {
+  try {
+    const { paymentId } = req.params;
+    const status = await paymentQueueProcessor.getPaymentStatus(paymentId);
+    
+    if (!status) {
+      return res.status(404).json({
+        error: "Payment not found",
+      });
+    }
+
+    // Format response
+    const response: any = {
+      paymentId: status.id,
+      paymentType: status.payment_type,
+      status: status.status,
+      payer: status.payer,
+      amount: status.amount,
+      paymentTokenAddress: status.payment_token_address,
+      txHash: status.tx_hash,
+      error: status.error,
+      createdAt: status.created_at,
+      processedAt: status.processed_at,
+    };
+
+    // Include deployment result if available
+    if (status.result) {
+      response.result = status.result;
+      
+      // For deploy payments, add convenient fields
+      if (status.payment_type === 'deploy' && status.result.tokenAddress) {
+        response.tokenAddress = status.result.tokenAddress;
+        response.deployTxHash = status.result.deployTxHash;
+        response.mintUrl = `${req.protocol}://${req.get('host')}/mint/${status.result.tokenAddress}`;
+      }
+    }
+
+    return res.json(response);
+  } catch (error: any) {
+    return res.status(500).json({
+      error: "Failed to fetch payment status",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/payment/stats - Get payment queue statistics
+ */
+app.get("/api/payment/stats", async (req, res) => {
+  try {
+    const stats = await paymentQueueProcessor.getStats();
+    return res.json(stats);
+  } catch (error: any) {
+    return res.status(500).json({
+      error: "Failed to fetch payment stats",
+      message: error.message,
+    });
+  }
+});
+
+/**
  * GET /api/queue/:queueId - Get queue item status
  */
 app.get("/api/queue/:queueId", async (req, res) => {
@@ -1430,21 +1487,29 @@ async function start() {
     process.exit(1);
   }
 
-  // Start queue processor
+  // Start queue processors
   await queueProcessor.start();
+  await paymentQueueProcessor.start();
 
   // Get actual queue config from database
-  let queueConfigDisplay = "enabled";
+  let mintQueueConfigDisplay = "enabled";
+  let paymentQueueConfigDisplay = "enabled";
   try {
     const configResult = await pool.query(`
-      SELECT value FROM system_settings WHERE key = 'batch_interval_seconds'
+      SELECT key, value FROM system_settings 
+      WHERE key IN ('batch_interval_seconds', 'payment_batch_interval_seconds')
     `);
-    if (configResult.rows.length > 0) {
-      const interval = parseInt(configResult.rows[0].value);
-      queueConfigDisplay = `✅ Enabled (batch every ${interval}s)`;
-    }
+    configResult.rows.forEach(row => {
+      const interval = parseInt(row.value);
+      if (row.key === 'batch_interval_seconds') {
+        mintQueueConfigDisplay = `✅ Enabled (batch every ${interval}s)`;
+      } else if (row.key === 'payment_batch_interval_seconds') {
+        paymentQueueConfigDisplay = `✅ Enabled (batch every ${interval}s)`;
+      }
+    });
   } catch (e) {
-    queueConfigDisplay = "✅ Enabled";
+    mintQueueConfigDisplay = "✅ Enabled";
+    paymentQueueConfigDisplay = "✅ Enabled";
   }
 
   app.listen(PORT, () => {
@@ -1457,7 +1522,8 @@ async function start() {
     console.log(`   SERVER (USDC payments): ${serverAccount.address}`);
     console.log(`   MINTER (mint execution): ${minterAccount.address}`);
     console.log(`\n⚙️  Queue Processors:`);
-    console.log(`   Mint Queue: ${queueConfigDisplay}`);
+    console.log(`   Payment Queue: ${paymentQueueConfigDisplay}`);
+    console.log(`   Mint Queue: ${mintQueueConfigDisplay}`);
     console.log(`   x402: ${x402Enabled ? '✅ Enabled' : '❌ Disabled'}`);
     console.log(``);
   });
@@ -1468,6 +1534,7 @@ start().catch(console.error);
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   queueProcessor.stop();
+  paymentQueueProcessor.stop();
   if (redis) await redis.quit();
   await pool.end();
   process.exit(0);
@@ -1475,6 +1542,7 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   queueProcessor.stop();
+  paymentQueueProcessor.stop();
   if (redis) await redis.quit();
   await pool.end();
   process.exit(0);

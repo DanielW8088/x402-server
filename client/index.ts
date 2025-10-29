@@ -1,9 +1,9 @@
 import { config } from "dotenv";
 import axios from "axios";
-import { createWalletClient, http, formatUnits, publicActions } from "viem";
+import { createWalletClient, createPublicClient, http, formatUnits, parseAbi, getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
-import { wrapFetchWithPayment, decodeXPaymentResponse } from "x402-fetch";
+import { randomBytes } from "crypto";
 
 config();
 
@@ -29,12 +29,33 @@ if (!tokenAddress) {
 const chain = network === "base-sepolia" ? baseSepolia : base;
 const account = privateKeyToAccount(privateKey);
 
-// Create wallet client with public actions for x402
+// USDC addresses
+const USDC_ADDRESS = network === "base-sepolia"
+  ? "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as `0x${string}`
+  : "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as `0x${string}`;
+
+// RPC URL configuration
+const rpcUrl = network === "base-sepolia" 
+  ? (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org")
+  : (process.env.BASE_RPC_URL || "https://mainnet.base.org");
+
+// Create wallet client
 const walletClient = createWalletClient({
   account,
   chain,
-  transport: http(),
-}).extend(publicActions);
+  transport: http(rpcUrl),
+});
+
+const publicClient = createPublicClient({
+  chain,
+  transport: http(rpcUrl),
+});
+
+// USDC ABI
+const usdcAbi = parseAbi([
+  "function balanceOf(address account) view returns (uint256)",
+  "function nonces(address owner) view returns (uint256)",
+]);
 
 /**
  * Get token info (free endpoint)
@@ -50,16 +71,81 @@ async function getTokenInfo() {
 }
 
 /**
+ * Create EIP-3009 authorization signature for USDC transferWithAuthorization
+ */
+async function createTransferAuthorization(
+  from: `0x${string}`,
+  to: `0x${string}`,
+  value: bigint,
+  validAfter: bigint = 0n,
+  validBefore: bigint = BigInt(Math.floor(Date.now() / 1000) + 3600) // 1 hour validity
+): Promise<any> {
+  // Generate random nonce
+  const nonce = `0x${randomBytes(32).toString('hex')}` as `0x${string}`;
+  
+  // USDC domain (EIP-712)
+  // CRITICAL: Base Sepolia USDC name is "USDC", Base Mainnet is "USD Coin"
+  const usdcName = network === 'base-sepolia' ? 'USDC' : 'USD Coin';
+  const domain = {
+    name: usdcName,
+    version: '2',
+    chainId: chain.id,
+    verifyingContract: USDC_ADDRESS,
+  };
+
+  // EIP-712 typed data
+  const types = {
+    TransferWithAuthorization: [
+      { name: 'from', type: 'address' },
+      { name: 'to', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'validAfter', type: 'uint256' },
+      { name: 'validBefore', type: 'uint256' },
+      { name: 'nonce', type: 'bytes32' },
+    ],
+  };
+
+  const message = {
+    from,
+    to,
+    value,
+    validAfter,
+    validBefore,
+    nonce,
+  };
+
+  // Sign typed data
+  const signature = await walletClient.signTypedData({
+    account,
+    domain,
+    types,
+    primaryType: 'TransferWithAuthorization',
+    message,
+  });
+
+  return {
+    from: getAddress(from),
+    to: getAddress(to),
+    value: value.toString(),
+    validAfter: validAfter.toString(),
+    validBefore: validBefore.toString(),
+    nonce,
+    signature,
+  };
+}
+
+/**
  * Main function
  */
 async function main() {
-  console.log("🚀 x402 Token Mint Client (Coinbase x402-fetch)");
-  console.log("================================================\n");
+  console.log("🚀 Token Mint Client (Traditional EIP-3009)");
+  console.log("============================================\n");
   console.log(`Network: ${network}`);
+  console.log(`RPC URL: ${rpcUrl}`);
   console.log(`Your address: ${account.address}`);
   console.log(`Server: ${serverUrl}`);
   console.log(`Token: ${tokenAddress}`);
-  console.log(`Protocol: x402 (Coinbase Official)\n`);
+  console.log(`Protocol: EIP-3009 (Gasless USDC)\n`);
 
   try {
     // 1. Get token info
@@ -87,64 +173,76 @@ async function main() {
       console.log(`   Mint progress: ${tokenInfo.mintProgress}`);
     }
 
-    // 2. Setup x402 fetch with automatic payment handling
-    console.log(`\n🎨 Step 2: Minting tokens via x402...`);
+    // 2. Parse price and create authorization
+    console.log(`\n💳 Step 2: Creating EIP-3009 payment authorization...`);
+    
+    // Parse price from "1 USDC" format
+    const priceMatch = tokenInfo.price.match(/[\d.]+/);
+    const pricePerMint = priceMatch ? parseFloat(priceMatch[0]) : 1;
+    const paymentAmount = BigInt(Math.floor(pricePerMint * 1e6)); // USDC has 6 decimals
+    
+    console.log(`   Amount: ${formatUnits(paymentAmount, 6)} USDC`);
+    console.log(`   From: ${account.address}`);
+    console.log(`   To: ${tokenInfo.paymentAddress}`);
+    
+    // Check USDC balance
+    const balance = await publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: usdcAbi,
+      functionName: "balanceOf",
+      args: [account.address],
+    }) as bigint;
+    
+    console.log(`   Your USDC balance: ${formatUnits(balance, 6)} USDC`);
+    
+    if (balance < paymentAmount) {
+      throw new Error(`Insufficient USDC balance. Need ${formatUnits(paymentAmount, 6)} USDC but have ${formatUnits(balance, 6)} USDC`);
+    }
+    
+    // Create authorization signature
+    console.log(`   Signing payment authorization...`);
+    const authorization = await createTransferAuthorization(
+      account.address,
+      tokenInfo.paymentAddress as `0x${string}`,
+      paymentAmount
+    );
+    console.log(`   ✅ Authorization signed`);
+
+    // 3. Send mint request with authorization
+    console.log(`\n🎨 Step 3: Minting tokens with traditional payment...`);
     console.log(`${'='.repeat(50)}\n`);
     
-    // Wrap fetch with x402 payment handling
-    // Use walletClient which contains the account
-    // maxValue: 1.5 USDC (1500000 in 6 decimals)
-    const fetchWithPayment = wrapFetchWithPayment(
-      fetch, 
-      walletClient as any, // Type workaround for viem/x402 compatibility
-      BigInt(1_500_000) // 1.5 USDC max
-    );
-
-    // Make the mint request
-    // x402-fetch will automatically:
-    // 1. Detect 402 response
-    // 2. Parse payment requirements
-    // 3. Verify payment amount is within allowed maximum
-    // 4. Create payment proof using wallet client
-    // 5. Retry with X-PAYMENT header
-    console.log(`   Sending mint request...`);
-    const response = await fetchWithPayment(`${serverUrl}/api/mint/${tokenAddress}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        payer: account.address,
-      }),
+    const response = await axios.post(`${serverUrl}/api/mint/${tokenAddress}`, {
+      payer: account.address,
+      authorization: authorization,
     });
 
-    console.log(`   Response status: ${response.status}`);
+    const mintResult = response.data;
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`   Error body:`, errorText);
-      throw new Error(`Request failed: ${response.status} ${response.statusText}\n${errorText}`);
-    }
-
-    const mintResult: any = await response.json();
-
-    // 3. Display results
+    // 4. Display results
     console.log(`\n${'='.repeat(50)}`);
-    console.log("✨ SUCCESS! Tokens minted via x402!");
-    console.log("====================================");
+    console.log("✨ SUCCESS! Tokens minted via EIP-3009!");
+    console.log("========================================");
     
     // Handle both immediate mints and queued mints
     if (mintResult.queueId) {
       // Queued response
       console.log(`Queue ID: ${mintResult.queueId}`);
       console.log(`Status: ${mintResult.status}`);
-      console.log(`Position: ${mintResult.position || 'N/A'}`);
+      console.log(`Position: ${mintResult.queuePosition || 'N/A'}`);
+      console.log(`Payment mode: ${mintResult.paymentMode}`);
+      if (mintResult.paymentTxHash) {
+        console.log(`Payment TX: ${mintResult.paymentTxHash}`);
+      }
       console.log(`\n💡 Check status: ${serverUrl}/api/queue/${mintResult.queueId}`);
     } else {
       // Immediate mint response
       console.log(`Payer: ${mintResult.payer}`);
       if (mintResult.amount) {
         console.log(`Amount: ${formatUnits(BigInt(mintResult.amount), 18)} tokens`);
+      }
+      if (mintResult.paymentTxHash) {
+        console.log(`Payment TX: ${mintResult.paymentTxHash}`);
       }
       if (mintResult.mintTxHash) {
         console.log(`Mint TX: ${mintResult.mintTxHash}`);
@@ -157,26 +255,13 @@ async function main() {
       }
     }
     
-    // Check for payment response header
-    const paymentResponseHeader = response.headers.get("x-payment-response");
-    if (paymentResponseHeader) {
-      console.log(`\n💳 Payment details:`);
-      try {
-        const paymentResponse = decodeXPaymentResponse(paymentResponseHeader);
-        console.log(`   Payment verified: ✅`);
-        console.log(`   Payment info:`, JSON.stringify(paymentResponse, null, 2));
-      } catch (e) {
-        console.log(`   Payment response: ${paymentResponseHeader}`);
-      }
-    }
-    
-    console.log("\n💡 How x402-fetch worked:");
-    console.log(`   1. Client requested /api/mint/${tokenAddress}`);
-    console.log("   2. x402-fetch detected 402 Payment Required");
-    console.log("   3. x402-fetch parsed payment requirements");
-    console.log("   4. x402-fetch created payment proof with wallet");
-    console.log("   5. x402-fetch retried with X-PAYMENT header");
-    console.log("   6. Server verified and queued/minted tokens!");
+    console.log("\n💡 How EIP-3009 worked:");
+    console.log("   1. Client fetched token info and price");
+    console.log("   2. Client signed EIP-3009 authorization (no gas!)");
+    console.log("   3. Client sent authorization to server");
+    console.log("   4. Server verified and executed USDC transfer");
+    console.log("   5. Server queued/minted tokens to your address!");
+    console.log("\n   ✅ You only signed - no gas fees paid!");
     
     console.log("\n🎉 All done!");
 
@@ -192,12 +277,10 @@ async function main() {
       console.error("\nCause:", error.cause);
     }
     
-    if (error.message?.includes("payment")) {
-      console.error("\n💡 Payment tips:");
-      console.error("   - Make sure you have USDC in your wallet");
-      console.error("   - Check that payment amount is acceptable");
-      console.error("   - Verify your wallet has gas for signatures");
-    }
+    console.error("\n💡 Tips:");
+    console.error("   - Make sure you have USDC in your wallet");
+    console.error("   - EIP-3009 is gasless - you only sign, server pays gas");
+    console.error("   - Check token info matches expected payment");
     
     process.exit(1);
   }
