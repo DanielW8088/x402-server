@@ -12,20 +12,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /**
  * @title X402Token - 0x402 Token with Gasless Minting
- * @notice ERC20 token with EIP-3009 (gasless transfers), access control, and automated liquidity
- * 
- * Features:
- * - Gasless minting via EIP-3009 transferWithAuthorization
- * - 80/20 tokenomics: 80% user mints, 20% LP reserve
- * - After all mints complete, tokens and USDC are transferred to LP deployer address
- * - LP deployment handled by backend service
- * - Automated role management for secure operations
+ * @notice ERC20 token with EIP-3009 (gasless transfers), access control, automated liquidity,
+ *         pre-LP transfer gating, and pre-LP refund-on-send-to-contract.
  */
 contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     using SafeERC20 for IERC20;
-    
+
     // ==================== Errors ====================
-    
+
     error ArrayLengthMismatch();
     error AlreadyMinted(address to, bytes32 txHash);
     error MaxMintCountExceeded();
@@ -37,23 +31,31 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     error InvalidAddress();
     error InvalidAmount();
     error EmergencyModeActive();
+    error TransfersLocked();
+    error InsufficientUSDC(uint256 need, uint256 have);
+    error NotLpDeployer();
 
     // ==================== Events ====================
-    
+
     event TokensMinted(address indexed to, uint256 amount, bytes32 txHash);
     event AssetsTransferredForLP(address indexed lpDeployer, uint256 tokenAmount, uint256 usdcAmount);
     event EmergencyWithdraw(address indexed recipient, uint256 amount);
     event TokenWithdraw(address indexed token, address indexed recipient, uint256 amount);
 
-    // --- EIP-3009 events ---
+    // EIP-3009 events
     event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
     event AuthorizationCanceled(address indexed authorizer, bytes32 indexed nonce);
+
+    // New events
+    event RefundProcessed(address indexed user, uint256 tokenAmount, uint256 refundUSDC, uint256 feeUSDC);
+    event LpStatusChanged(bool live);
+    event MintingCompleted(uint256 totalMinted);
 
     // ==================== Constants ====================
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
-    // --- EIP-3009 typehashes ---
+    // EIP-3009 typehashes
     bytes32 private constant _TRANSFER_WITH_AUTHORIZATION_TYPEHASH = keccak256(
         "TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
     );
@@ -65,13 +67,13 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
     // ==================== Immutable State ====================
 
-    /// @notice The payment token (USDC)
+    /// @notice The payment token (e.g., USDC)
     address internal immutable PAYMENT_TOKEN;
 
     /// @notice Price per mint in payment token
     uint256 internal immutable PRICE_PER_MINT;
 
-    /// @notice Pool seed amount (tokens for liquidity)
+    /// @notice Pool seed amount (tokens earmarked for LP)
     uint256 internal immutable POOL_SEED_AMOUNT;
 
     /// @notice Amount of tokens to mint per payment
@@ -80,10 +82,10 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     /// @notice Maximum number of mints allowed
     uint256 public immutable MAX_MINT_COUNT;
 
-    /// @notice Address to receive excess USDC
+    /// @notice Address to receive excess funds and refund fees
     address internal immutable EXCESS_RECIPIENT;
 
-    /// @notice Address that will deploy LP (receives tokens and USDC)
+    /// @notice Address that will deploy the LP
     address public immutable LP_DEPLOYER;
 
     // ==================== Mutable State ====================
@@ -93,6 +95,12 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     mapping(address => mapping(bytes32 => uint8)) private _authorizationStates;
     bool internal _assetsTransferred;
     bool internal _emergencyWithdrawUsed;
+
+    /// @notice LP live flag. False before LP is confirmed live; true after LP deployer confirms.
+    bool public lpLive;
+
+    /// @notice Minting completed flag. True when all mints are done, waiting for LP deployment.
+    bool public mintingCompleted;
 
     // ==================== Constructor ====================
 
@@ -107,34 +115,24 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         address _excessRecipient,
         address _lpDeployer
     ) ERC20(name, symbol) EIP712(name, "1") Ownable(msg.sender) {
-        // Validate addresses
         if (_paymentToken == address(0)) revert InvalidAddress();
         if (_excessRecipient == address(0)) revert InvalidAddress();
         if (_lpDeployer == address(0)) revert InvalidAddress();
-        
-        // Validate amounts
+
         if (_mintAmount == 0) revert InvalidAmount();
         if (_maxMintCount == 0) revert InvalidAmount();
         if (_pricePerMint == 0) revert InvalidAmount();
         if (_poolSeedAmount == 0) revert InvalidAmount();
-        
-        // Validate supply constraints
-        // Check for overflow in multiplication (total user mintable amount)
+
         unchecked {
             uint256 totalUserMintable = _mintAmount * _maxMintCount;
-            // Ensure multiplication didn't overflow
-            if (_maxMintCount > 0 && totalUserMintable / _maxMintCount != _mintAmount) {
-                revert InvalidAmount();
-            }
-            // Ensure addition doesn't overflow (pool + user mints)
-            if (_poolSeedAmount + totalUserMintable < _poolSeedAmount) {
-                revert InvalidAmount();
-            }
+            if (_maxMintCount > 0 && totalUserMintable / _maxMintCount != _mintAmount) revert InvalidAmount();
+            if (_poolSeedAmount + totalUserMintable < _poolSeedAmount) revert InvalidAmount();
         }
-        
+
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(MINTER_ROLE, msg.sender);
-        
+
         MINT_AMOUNT = _mintAmount;
         MAX_MINT_COUNT = _maxMintCount;
         PAYMENT_TOKEN = _paymentToken;
@@ -143,8 +141,26 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         EXCESS_RECIPIENT = _excessRecipient;
         LP_DEPLOYER = _lpDeployer;
 
-        // Pre-mint LP seed amount to contract
+        // Pre-mint LP seed amount to the contract
         _mint(address(this), _poolSeedAmount);
+
+        // LP is not live at deployment; deployer must confirm after LP is successfully deployed
+        lpLive = false;
+        mintingCompleted = false;
+        emit LpStatusChanged(false);
+    }
+
+    // ==================== Modifiers / LP Confirmation ====================
+
+    /// @notice Must be called by LP_DEPLOYER to confirm that LP is live.
+    function confirmLpLive() external {
+        if (msg.sender != LP_DEPLOYER) revert NotLpDeployer();
+        require(!_emergencyWithdrawUsed, "Emergency mode");
+        require(_assetsTransferred, "Assets not transferred");
+        require(!lpLive, "LP already live");
+
+        lpLive = true;
+        emit LpStatusChanged(true);
     }
 
     // ==================== EIP-3009 Functions ====================
@@ -170,16 +186,11 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     ) external {
         if (to == address(0)) revert InvalidRecipient(to);
         _requireValidAuthorization(from, nonce, validAfter, validBefore);
-        
+
         bytes32 structHash = keccak256(
             abi.encode(
                 _TRANSFER_WITH_AUTHORIZATION_TYPEHASH,
-                from,
-                to,
-                value,
-                validAfter,
-                validBefore,
-                nonce
+                from, to, value, validAfter, validBefore, nonce
             )
         );
         _requireValidSignature(from, structHash, v, r, s);
@@ -200,16 +211,11 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     ) external {
         if (to != msg.sender) revert InvalidRecipient(to);
         _requireValidAuthorization(from, nonce, validAfter, validBefore);
-        
+
         bytes32 structHash = keccak256(
             abi.encode(
                 _RECEIVE_WITH_AUTHORIZATION_TYPEHASH,
-                from,
-                to,
-                value,
-                validAfter,
-                validBefore,
-                nonce
+                from, to, value, validAfter, validBefore, nonce
             )
         );
         _requireValidSignature(from, structHash, v, r, s);
@@ -225,10 +231,7 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         bytes32 s
     ) external {
         _requireValidAuthorization(authorizer, nonce, 0, type(uint256).max);
-        
-        bytes32 structHash = keccak256(
-            abi.encode(_CANCEL_AUTHORIZATION_TYPEHASH, authorizer, nonce)
-        );
+        bytes32 structHash = keccak256(abi.encode(_CANCEL_AUTHORIZATION_TYPEHASH, authorizer, nonce));
         _requireValidSignature(authorizer, structHash, v, r, s);
         _authorizationStates[authorizer][nonce] = 1;
         emit AuthorizationCanceled(authorizer, nonce);
@@ -287,6 +290,12 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
             emit TokensMinted(to[i], MINT_AMOUNT, txHashes[i]);
         }
         _mintCount += to.length;
+
+        // Check if minting is now completed
+        if (_mintCount >= MAX_MINT_COUNT && !mintingCompleted) {
+            mintingCompleted = true;
+            emit MintingCompleted(_mintCount);
+        }
     }
 
     function mint(address to, bytes32 txHash) external onlyRole(MINTER_ROLE) {
@@ -299,9 +308,9 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
     // ==================== LP Asset Transfer ====================
 
-    /// @notice Transfer tokens and USDC to LP deployer after all mints complete
-    /// @dev Can only be called once, when maxMintCount is reached
-    /// @dev Cannot be called if emergency withdraw has been used
+    /// @notice Transfers tokens and payment token to LP deployer after all mints complete.
+    /// @dev Can only be called once, when maxMintCount is reached and emergency not engaged.
+    /// @dev Does NOT set lpLive; LP_DEPLOYER must call confirmLpLive() after LP deployment succeeds.
     function transferAssetsForLP() external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_mintCount >= MAX_MINT_COUNT, "Max mint count not reached yet");
         require(!_assetsTransferred, "Assets already transferred");
@@ -309,34 +318,31 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
         _assetsTransferred = true;
 
-        // Calculate USDC needed for LP
-        // Note: This calculation may have rounding (truncation toward zero)
-        // Pool economics should account for this potential 1-wei difference
+        // Payment amount needed for LP alongside seed tokens
         uint256 amountPayment = (POOL_SEED_AMOUNT * PRICE_PER_MINT) / MINT_AMOUNT;
-        
-        // Transfer excess USDC to recipient using SafeERC20
+
+        // Send excess payment token to EXCESS_RECIPIENT
         uint256 totalBalance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
         if (totalBalance > amountPayment) {
             uint256 excess = totalBalance - amountPayment;
             IERC20(PAYMENT_TOKEN).safeTransfer(EXCESS_RECIPIENT, excess);
         }
 
-        // Transfer tokens to LP deployer
+        // Transfer seed tokens to LP deployer
         _transfer(address(this), LP_DEPLOYER, POOL_SEED_AMOUNT);
-        
-        // Transfer USDC to LP deployer using SafeERC20
+
+        // Transfer payment token to LP deployer
         IERC20(PAYMENT_TOKEN).safeTransfer(LP_DEPLOYER, amountPayment);
 
         emit AssetsTransferredForLP(LP_DEPLOYER, POOL_SEED_AMOUNT, amountPayment);
     }
 
-    /// @notice Emergency withdraw before assets are transferred
-    /// @dev Once used, LP asset transfer will be permanently blocked
+    /// @notice Emergency withdraw of payment token before assets are transferred to LP.
     function emergencyWithdraw() external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(!_assetsTransferred, "Assets already transferred");
         require(!_emergencyWithdrawUsed, "Emergency withdraw already used");
         _emergencyWithdrawUsed = true;
-        
+
         uint256 balance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
         if (balance > 0) {
             IERC20(PAYMENT_TOKEN).safeTransfer(msg.sender, balance);
@@ -344,43 +350,40 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         }
     }
 
-    /// @notice Withdraw any ERC20 token from the contract
-    /// @param token ERC20 token address to withdraw
-    /// @param amount Amount to withdraw (0 = withdraw all)
-    /// @param recipient Address to receive tokens (address(0) = msg.sender)
+    /// @notice Withdraw any ERC20 token held by this contract.
     function withdrawERC20(address token, uint256 amount, address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (token == address(0)) revert InvalidAddress();
         address to = recipient == address(0) ? msg.sender : recipient;
         uint256 balance = IERC20(token).balanceOf(address(this));
         uint256 withdrawAmount = amount == 0 ? balance : amount;
-        
+
         if (withdrawAmount == 0) revert InvalidAmount();
         require(balance >= withdrawAmount, "Insufficient balance");
-        
+
         IERC20(token).safeTransfer(to, withdrawAmount);
         emit TokenWithdraw(token, to, withdrawAmount);
     }
 
-    /// @notice Withdraw USDC (convenience function)
+    /// @notice Withdraw payment token (convenience wrapper).
     function withdrawUSDC(uint256 amount, address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
         address to = recipient == address(0) ? msg.sender : recipient;
         uint256 balance = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
         uint256 withdrawAmount = amount == 0 ? balance : amount;
-        
+
         if (withdrawAmount == 0) revert InvalidAmount();
         require(balance >= withdrawAmount, "Insufficient balance");
-        
+
         IERC20(PAYMENT_TOKEN).safeTransfer(to, withdrawAmount);
         emit TokenWithdraw(PAYMENT_TOKEN, to, withdrawAmount);
     }
 
-    /// @notice Check ERC20 token balance in contract
+    /// @notice Get ERC20 token balance held by this contract.
     function getTokenBalance(address token) external view returns (uint256) {
         address tokenToCheck = token == address(0) ? PAYMENT_TOKEN : token;
         return IERC20(tokenToCheck).balanceOf(address(this));
     }
 
-    /// @notice Check USDC balance in contract
+    /// @notice Get payment token balance held by this contract.
     function getUSDCBalance() external view returns (uint256) {
         return IERC20(PAYMENT_TOKEN).balanceOf(address(this));
     }
@@ -399,16 +402,12 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         return _assetsTransferred;
     }
 
-    // ==================== Compatibility Functions ====================
-    // For backward compatibility with frontend/tooling expecting old function names
-
+    // Backward-compatibility getters
     function mintAmount() external view returns (uint256) {
         return MINT_AMOUNT;
     }
 
     function maxSupply() external view returns (uint256) {
-        // Return actual total supply: user mintable + LP pool
-        // This is the real total supply that will exist after all mints and LP deployment
         return (MINT_AMOUNT * MAX_MINT_COUNT) + POOL_SEED_AMOUNT;
     }
 
@@ -429,7 +428,6 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     }
 
     function remainingSupply() external view returns (uint256) {
-        // Remaining mintable supply = (maxMintCount - mintCount) * mintAmount
         uint256 remainingMints = MAX_MINT_COUNT > _mintCount ? MAX_MINT_COUNT - _mintCount : 0;
         return remainingMints * MINT_AMOUNT;
     }
@@ -441,5 +439,97 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     function excessRecipient() external view returns (address) {
         return EXCESS_RECIPIENT;
     }
-}
 
+    // ==================== Transfer Gate & Refund-on-Send ====================
+
+    /**
+     * @dev Override of ERC20._update (OpenZeppelin v5).
+     *
+     * Pre-LP rules (lpLive == false):
+     * - Only owner() and LP_DEPLOYER may transfer freely (besides mint/burn or contract-internal moves).
+     * - Any user may transfer tokens to address(this) to receive a refund in payment token:
+     *     * refundBase = (value * PRICE_PER_MINT) / MINT_AMOUNT
+     *     * 95% refunded to the sender, 5% sent to EXCESS_RECIPIENT as fee.
+     *     * ONLY allowed if mintingCompleted == false (minting still ongoing).
+     *     * Once mintingCompleted == true, refunds are blocked (waiting for LP deployment).
+     *   The received tokens are immediately burned.
+     *
+     * Post-LP rules (lpLive == true):
+     * - Normal ERC20 transfers (except sending to contract address, which is blocked to prevent loss).
+     */
+    function _update(address from, address to, uint256 value) internal override {
+        bool isMint = (from == address(0));
+        bool isBurn = (to == address(0));
+        bool fromIsContract = (from == address(this));
+        bool toIsContract = (to == address(this));
+
+        if (!lpLive) {
+            bool fromIsOwnerOrLP = (from == owner() || from == LP_DEPLOYER);
+
+            // Refund path: user sends tokens to this contract before LP is live AND minting not completed
+            if (toIsContract && !isMint && !isBurn && !fromIsContract && !mintingCompleted) {
+                // 1) Compute refund parameters (must be exact multiple of MINT_AMOUNT)
+                if (value % MINT_AMOUNT != 0) revert InvalidAmount();
+                uint256 mintsToRefund = value / MINT_AMOUNT;
+                
+                // 2) Move tokens into the contract
+                super._update(from, to, value);
+                // 3) Burn them to avoid recycling
+                _burn(address(this), value);
+
+                // 4) Decrease mint count to allow re-minting
+                _mintCount -= mintsToRefund;
+                
+                // 5) If minting was completed, revert that status
+                if (mintingCompleted) {
+                    mintingCompleted = false;
+                }
+
+                // 6) Compute refund and fee in payment token
+                uint256 refundBase = (value * PRICE_PER_MINT) / MINT_AMOUNT;
+                if (refundBase == 0) revert InvalidAmount();
+
+                uint256 refundToUser = (refundBase * 95) / 100;
+                uint256 feeToTreasury = refundBase - refundToUser;
+
+                uint256 usdcBal = IERC20(PAYMENT_TOKEN).balanceOf(address(this));
+                if (usdcBal < refundBase) revert InsufficientUSDC(refundBase, usdcBal);
+
+                // 7) Transfer payment token: 95% to user, 5% to EXCESS_RECIPIENT
+                IERC20(PAYMENT_TOKEN).safeTransfer(from, refundToUser);
+                if (feeToTreasury > 0) {
+                    IERC20(PAYMENT_TOKEN).safeTransfer(EXCESS_RECIPIENT, feeToTreasury);
+                }
+
+                emit RefundProcessed(from, value, refundToUser, feeToTreasury);
+                return;
+            }
+
+            // Block transfers to contract if minting is completed (waiting for LP)
+            // Users cannot get refunds after minting completes
+            if (toIsContract && !isMint && !isBurn && !fromIsContract && mintingCompleted) {
+                revert TransfersLocked();
+            }
+
+            // Otherwise, only allow owner/LP deployer (plus mint/burn/contract-internal) to move tokens
+            // This catches all other transfers (including to contract if refund not processed above)
+            if (
+                !isMint &&
+                !isBurn &&
+                !fromIsContract &&
+                !(fromIsOwnerOrLP)
+            ) {
+                revert TransfersLocked();
+            }
+        } else {
+            // LP is live: block transfers to contract to prevent accidental loss
+            // (refunds are no longer available)
+            if (toIsContract && !isMint && !isBurn && !fromIsContract) {
+                revert TransfersLocked();
+            }
+        }
+
+        // Default behavior (post-LP or allowed cases pre-LP)
+        super._update(from, to, value);
+    }
+}
