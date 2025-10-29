@@ -102,6 +102,9 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
     /// @notice Minting completed flag. True when all mints are done, waiting for LP deployment.
     bool public mintingCompleted;
 
+    /// @notice LaunchTool contract address (allowed to transfer tokens before LP is live)
+    address public launchTool;
+
     // ==================== Constructor ====================
 
     constructor(
@@ -150,6 +153,16 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
         emit LpStatusChanged(false);
     }
 
+    // ==================== Token Overrides ====================
+
+    /**
+     * @notice Override decimals to use 6 (same as USDC) instead of default 18
+     * @dev This helps avoid precision issues when creating Uniswap V3 pools
+     */
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+
     // ==================== Modifiers / LP Confirmation ====================
 
     /// @notice Must be called by LP_DEPLOYER to confirm that LP is live.
@@ -161,6 +174,13 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
         lpLive = true;
         emit LpStatusChanged(true);
+    }
+
+    /// @notice Set LaunchTool address (only owner, only before LP is live)
+    function setLaunchTool(address _launchTool) external onlyOwner {
+        require(!lpLive, "LP already live");
+        require(_launchTool != address(0), "Invalid address");
+        launchTool = _launchTool;
     }
 
     // ==================== EIP-3009 Functions ====================
@@ -465,6 +485,7 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
 
         if (!lpLive) {
             bool fromIsOwnerOrLP = (from == owner() || from == LP_DEPLOYER);
+            bool fromIsLaunchTool = (from == launchTool && launchTool != address(0));
 
             // Refund path: user sends tokens to this contract before LP is live AND minting not completed
             if (toIsContract && !isMint && !isBurn && !fromIsContract && !mintingCompleted) {
@@ -506,17 +527,17 @@ contract X402Token is ERC20, ERC20Burnable, AccessControl, EIP712, Ownable {
             }
 
             // Block transfers to contract if minting is completed (waiting for LP)
-            // Exception: LP_DEPLOYER and owner can still transfer to contracts (needed for LaunchTool)
-            if (toIsContract && !isMint && !isBurn && !fromIsContract && mintingCompleted && !fromIsOwnerOrLP) {
+            // Exception: LP_DEPLOYER, owner, and LaunchTool can still transfer to contracts
+            if (toIsContract && !isMint && !isBurn && !fromIsContract && mintingCompleted && !fromIsOwnerOrLP && !fromIsLaunchTool) {
                 revert TransfersLocked();
             }
 
-            // Otherwise, only allow owner/LP deployer (plus mint/burn/contract-internal) to move tokens
+            // Otherwise, only allow owner/LP deployer/LaunchTool (plus mint/burn/contract-internal) to move tokens
             if (
                 !isMint &&
                 !isBurn &&
                 !fromIsContract &&
-                !(fromIsOwnerOrLP)
+                !(fromIsOwnerOrLP || fromIsLaunchTool)
             ) {
                 revert TransfersLocked();
             }

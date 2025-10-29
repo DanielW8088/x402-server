@@ -215,16 +215,24 @@ function floorToSpacing(tick, tickSpacing) {
 }
 
 /**
- * Get tick at sqrt price (simplified approximation)
- * For production, consider using @uniswap/v3-sdk
+ * Get tick at sqrt price
+ * tick = log_1.0001(price) where price = (sqrtPriceX96 / 2^96)^2
  */
 function getTickAtSqrtRatio(sqrtPriceX96) {
-    // Simplified calculation
-    // tick ≈ log_1.0001(price) = log(price) / log(1.0001)
     const Q96 = 2n ** 96n;
-    const price = (sqrtPriceX96 * sqrtPriceX96) / Q96 / Q96;
-    const priceFloat = Number(price) / Number(Q96);
+
+    // price = (sqrtPriceX96 / 2^96)^2
+    // To avoid precision loss, calculate: (sqrtPriceX96^2) / (2^96)^2
+    const sqrtPriceSquared = sqrtPriceX96 * sqrtPriceX96;
+    const Q192 = Q96 * Q96;
+
+    // Convert to float for log calculation
+    // Use high precision by keeping more significant digits
+    const priceFloat = Number(sqrtPriceSquared) / Number(Q192);
+
+    // tick = log(price) / log(1.0001)
     const tick = Math.floor(Math.log(priceFloat) / Math.log(1.0001));
+
     return tick;
 }
 

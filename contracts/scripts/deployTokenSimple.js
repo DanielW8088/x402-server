@@ -60,15 +60,16 @@ async function main() {
     console.log(`📍 Network: ${network}`);
     console.log(`   USDC: ${USDC}\n`);
 
-    // Calculate amounts
-    const mintAmountWei = hre.ethers.parseEther(MINT_AMOUNT);
+    // Calculate amounts (Token now uses 6 decimals like USDC)
+    const TOKEN_DECIMALS = 6;
+    const mintAmountWei = hre.ethers.parseUnits(MINT_AMOUNT, TOKEN_DECIMALS);
     const totalUserMint = mintAmountWei * BigInt(MAX_MINT_COUNT);
     const poolSeedAmount = totalUserMint / 4n; // 20% for LP
     const pricePerMintUSDC = hre.ethers.parseUnits(PRICE, 6);
 
     console.log(`💰 Token Economics:`);
-    console.log(`   Total User Mintable: ${hre.ethers.formatEther(totalUserMint)} tokens (80%)`);
-    console.log(`   LP Pool Reserve: ${hre.ethers.formatEther(poolSeedAmount)} tokens (20%)`);
+    console.log(`   Total User Mintable: ${hre.ethers.formatUnits(totalUserMint, TOKEN_DECIMALS)} tokens (80%)`);
+    console.log(`   LP Pool Reserve: ${hre.ethers.formatUnits(poolSeedAmount, TOKEN_DECIMALS)} tokens (20%)`);
     console.log(`   USDC Required for LP: ${hre.ethers.formatUnits(poolSeedAmount * pricePerMintUSDC / mintAmountWei, 6)} USDC`);
     console.log(`   Total USDC Revenue: ${hre.ethers.formatUnits(pricePerMintUSDC * BigInt(MAX_MINT_COUNT), 6)} USDC\n`);
 

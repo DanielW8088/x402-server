@@ -195,6 +195,7 @@ const tokenAbi = parseAbi([
   "function maxMintCount() view returns (uint256)",
   "function liquidityDeployed() view returns (bool)",
   "function balanceOf(address account) view returns (uint256)",
+  "function decimals() view returns (uint8)",
   "function MINTER_ROLE() view returns (bytes32)",
   "function hasRole(bytes32 role, address account) view returns (bool)",
   "event TokensMinted(address indexed to, uint256 amount, bytes32 txHash)",
@@ -999,6 +1000,19 @@ app.get("/api/tokens/:address", async (req, res) => {
       dbToken = await getToken(pool, address);
     }
 
+    // Get decimals from contract (new X402Tokens use 6 decimals)
+    let decimals = 6; // Default to 6 decimals
+    try {
+      const decimalsResult = await publicClient.readContract({
+        address: address as `0x${string}`,
+        abi: tokenAbi,
+        functionName: 'decimals',
+      }) as number;
+      decimals = decimalsResult;
+    } catch (err) {
+      console.warn(`Failed to read decimals for ${address}, using default 6:`, err);
+    }
+
     const response = {
       address: address,
       name: dbToken?.name || "Unknown Token",
@@ -1017,6 +1031,7 @@ app.get("/api/tokens/:address", async (req, res) => {
       deployer: dbToken?.deployer_address,
       paymentAddress: address, // USDC should be sent to token contract
       logoUrl: dbToken?.logo_url || null,
+      decimals, // Token decimals (6 for new X402Tokens, 18 for old ones)
     };
     
     // Store in cache

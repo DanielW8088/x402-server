@@ -62,10 +62,14 @@ function calculatePrice(sqrtPriceX96, decimals0, decimals1, token0IsUsdc) {
 
     if (token0IsUsdc) {
         // price = Token/USDC, so 1 Token = 1/price USDC
-        return Number(10n ** 18n / price) / 1e18;
+        // Use the actual decimals instead of hardcoded 18
+        const scale = 10n ** BigInt(decimals0); // USDC decimals (usually 6)
+        return Number(scale * scale / price) / Number(scale);
     } else {
         // price = USDC/Token, so 1 Token = price USDC
-        return Number(price) / 1e18;
+        // Use the actual decimals instead of hardcoded 18
+        const scale = 10n ** BigInt(decimals1); // USDC decimals (usually 6)
+        return Number(price) / Number(scale);
     }
 }
 

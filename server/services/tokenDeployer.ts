@@ -136,7 +136,9 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   // Total supply calculation:
   // - User mintable = tokenPerMint * maxMintCount (80% of total supply)
   // - LP pool reserve = 20% of total supply = (user mintable) / 4
-  const mintAmountWei = BigInt(config.mintAmount) * BigInt(10 ** 18);
+  // Token now uses 6 decimals (same as USDC)
+  const TOKEN_DECIMALS = 6;
+  const mintAmountWei = BigInt(config.mintAmount) * BigInt(10 ** TOKEN_DECIMALS);
   const totalUserMint = mintAmountWei * BigInt(config.maxMintCount);
   const poolSeedAmount = totalUserMint / BigInt(4); // 20% for LP pool (user mint is 80%)
   
@@ -157,21 +159,21 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
   // Price per token = pricePerMint / mintAmount
   // Example: 1 USDC buys 1000 tokens -> 0.001 USDC per token
   
-  // In wei terms:
-  // 1 token = 1e18 wei
-  // pricePerToken = pricePerMintUSDC (1e6 wei) / mintAmountWei (1e18 wei)
-  // = pricePerMintUSDC * 1e18 / mintAmountWei (in USDC wei per token wei)
+  // In wei terms (Token uses 6 decimals, same as USDC):
+  // 1 token = 1e6 wei (6 decimals)
+  // pricePerToken = pricePerMintUSDC (1e6 wei) / mintAmountWei (1e6 wei)
+  // = pricePerMintUSDC * 1e6 / mintAmountWei (in USDC wei per token wei)
   
-  const pricePerTokenInUSDCWei = (pricePerMintUSDC * BigInt(10 ** 18)) / mintAmountWei;
+  const pricePerTokenInUSDCWei = (pricePerMintUSDC * BigInt(10 ** TOKEN_DECIMALS)) / mintAmountWei;
   
   // Scenario 1: USDC is token0, Token is token1
-  // price = token1_wei / token0_wei = 1e18 / pricePerTokenInUSDCWei
-  const price1 = (BigInt(10 ** 18) * BigInt(2 ** 96)) / pricePerTokenInUSDCWei;
+  // price = token1_wei / token0_wei = 1e6 / pricePerTokenInUSDCWei
+  const price1 = (BigInt(10 ** TOKEN_DECIMALS) * BigInt(2 ** 96)) / pricePerTokenInUSDCWei;
   const sqrtPricePaymentFirst = sqrt(price1).toString();
   
   // Scenario 2: Token is token0, USDC is token1  
-  // price = token1_wei / token0_wei = pricePerTokenInUSDCWei / 1e18
-  const price2 = (pricePerTokenInUSDCWei * BigInt(2 ** 96)) / BigInt(10 ** 18);
+  // price = token1_wei / token0_wei = pricePerTokenInUSDCWei / 1e6
+  const price2 = (pricePerTokenInUSDCWei * BigInt(2 ** 96)) / BigInt(10 ** TOKEN_DECIMALS);
   const sqrtPriceTokenFirst = sqrt(price2).toString();
   
   console.log(`💡 Calculated sqrtPrices for ${config.price} USDC per ${config.mintAmount} tokens:`);
