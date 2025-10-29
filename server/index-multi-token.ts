@@ -84,7 +84,7 @@ if (missingVars.length > 0) {
 }
 
 if (!excessRecipient) {
-  console.warn("⚠️  EXCESS_RECIPIENT_ADDRESS not set. Excess USDC will be sent to token deployer by default.");
+  // EXCESS_RECIPIENT_ADDRESS not set, using deployer as default
 }
 
 // Setup database pool with SSL support
@@ -99,8 +99,7 @@ const sslConfig = (dbSslEnabled && isRemoteDB) ? (() => {
   
   // If certificate files are specified, use them
   if (sslCA || sslCert || sslKey) {
-    console.log("🔐 Using SSL certificates for database connection");
-    return {
+      return {
       rejectUnauthorized: true,
       ca: sslCA ? readFileSync(sslCA).toString() : undefined,
       cert: sslCert ? readFileSync(sslCert).toString() : undefined,
@@ -109,14 +108,13 @@ const sslConfig = (dbSslEnabled && isRemoteDB) ? (() => {
   }
   
   // Otherwise use default SSL with relaxed verification
-  console.log("🔓 Using SSL with relaxed verification for database connection");
   return {
     rejectUnauthorized: false
   };
 })() : false;
 
 if (!dbSslEnabled && isRemoteDB) {
-  console.warn("⚠️  SSL disabled for remote database connection (DB_SSL_ENABLED=false)");
+  // SSL disabled for remote database
 }
 
 const pool = new Pool({
@@ -141,8 +139,6 @@ const rpcUrl = network === "base-sepolia"
   ? (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org")
   : (process.env.BASE_RPC_URL || "https://mainnet.base.org");
 
-console.log(`🌐 Using RPC: ${rpcUrl}`);
-
 const walletClient = createWalletClient({
   account,
   chain,
@@ -165,7 +161,6 @@ const combinedClient = {
 } as any;
 
 // x402 is enabled by default, uses Coinbase facilitator
-console.log(`🔐 x402 protocol ${x402Enabled ? 'enabled' : 'disabled'}: ${x402FacilitatorUrl}`);
 
 // Contract ABIs
 const tokenAbi = parseAbi([
@@ -271,11 +266,8 @@ async function verifyX402Payment(
   req: any
 ): Promise<{ valid: boolean; payer?: string; amount?: bigint; error?: string }> {
   try {
-    console.log(`🔍 Verifying x402 payment...`);
-    
     // Decode X-PAYMENT header to get PaymentPayload
     const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
-    console.log(`📦 Payment payload:`, JSON.stringify(paymentPayload, null, 2));
     
     // Calculate price (must match 402 response)
     const pricePerMint = Number(expectedAmount) / (1e6 * quantity);
@@ -291,25 +283,11 @@ async function verifyX402Payment(
       baseUrl
     );
     
-    console.log(`📋 Payment requirements:`, JSON.stringify(paymentRequirements, null, 2));
-    
-    // Use x402 verify function
-    console.log(`⏳ Calling verify()...`);
-    console.log(`🔍 Verify inputs:`);
-    console.log(`   - publicClient chain:`, (publicClient as any).chain?.id);
-    console.log(`   - paymentPayload.network:`, paymentPayload.network);
-    console.log(`   - paymentRequirements.network:`, paymentRequirements.network);
-    console.log(`   - paymentRequirements.asset:`, paymentRequirements.asset);
-    console.log(`   - authorization.to:`, paymentPayload.payload?.authorization?.to);
-    console.log(`   - authorization.value:`, paymentPayload.payload?.authorization?.value);
-    
     const verifyResult = await verify(
       publicClient as any,
       paymentPayload,
       paymentRequirements
     );
-    
-    console.log(`📊 Verify result:`, JSON.stringify(verifyResult, null, 2));
     
     if (verifyResult.isValid) {
       return {
@@ -358,21 +336,16 @@ async function verifyX402Payment(
             ],
           };
           
-          const recovered = await recoverTypedDataAddress({
+          await recoverTypedDataAddress({
             domain,
             types,
             primaryType: 'TransferWithAuthorization',
             message: normMsg,
             signature: paymentPayload.payload.signature as `0x${string}`,
           });
-          
-          console.log('🧪 Signature recovery test:');
-          console.log(`   Recovered address: ${recovered}`);
-          console.log(`   Expected address:  ${auth.from}`);
-          console.log(`   Match: ${recovered.toLowerCase() === auth.from.toLowerCase() ? '✅' : '❌'}`);
         }
       } catch (recoverError: any) {
-        console.log('🧪 Signature recovery failed:', recoverError.message);
+        // Signature recovery failed
       }
       
       return { 
@@ -381,7 +354,6 @@ async function verifyX402Payment(
       };
     }
   } catch (error: any) {
-    console.error("❌ x402 verification error:", error.message);
     return { valid: false, error: error.message };
   }
 }
@@ -397,8 +369,6 @@ async function settleX402Payment(
   req: any
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
   try {
-    console.log(`💰 Settling x402 payment...`);
-    
     // Decode X-PAYMENT header to get PaymentPayload
     const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
     
@@ -416,12 +386,6 @@ async function settleX402Payment(
       baseUrl
     );
     
-    console.log(`📋 Payment payload network:`, paymentPayload.network);
-    console.log(`📋 Payment requirements network:`, paymentRequirements.network);
-    console.log(`🔗 WalletClient chain:`, walletClient.chain?.id, walletClient.chain?.name);
-    console.log(`📋 Settling with payment requirements:`, JSON.stringify(paymentRequirements, null, 2));
-    console.log(`📋 Payment payload:`, JSON.stringify(paymentPayload, null, 2));
-    
     // Use x402 settle function with combined client to execute on-chain payment
     // combinedClient has both verifyTypedData (from publicClient) and signing (from walletClient)
     try {
@@ -430,8 +394,6 @@ async function settleX402Payment(
         paymentPayload,
         paymentRequirements
       );
-      
-      console.log(`📊 Settle result:`, JSON.stringify(settleResult, null, 2));
       
       if (settleResult.success) {
         return {
@@ -445,13 +407,9 @@ async function settleX402Payment(
         };
       }
     } catch (settleError: any) {
-      console.error(`❌ Settle error:`, settleError);
-      console.error(`   Message:`, settleError.message);
-      console.error(`   Stack:`, settleError.stack);
       return { success: false, error: settleError.message };
     }
   } catch (error: any) {
-    console.error("❌ x402 settlement error:", error.message);
     return { success: false, error: error.message };
   }
 }
@@ -465,7 +423,6 @@ app.get("/api/deploy-address", async (req, res) => {
       deployAddress: account.address,
     });
   } catch (error: any) {
-    console.error("❌ Error getting deploy address:", error.message);
     return res.status(500).json({
       error: "Failed to get deploy address",
       message: error.message,
@@ -622,14 +579,11 @@ app.post("/api/deploy", async (req, res) => {
     // Use a deployment-specific lock ID
     const lockId = getAdvisoryLockId('token-deployment-global');
     
-    console.log(`\n🔒 Acquiring deployment lock (ID: ${lockId})...`);
-    
     await client.query('BEGIN');
     const lockResult = await client.query('SELECT pg_try_advisory_xact_lock($1) as acquired', [lockId.toString()]);
     
     if (!lockResult.rows[0].acquired) {
       await client.query('ROLLBACK');
-      console.log(`⏳ Another deployment in progress, client must wait...`);
       return res.status(503).json({
         error: "Deployment in progress",
         message: "Another token is currently being deployed. Please wait a moment and try again.",
@@ -637,18 +591,7 @@ app.post("/api/deploy", async (req, res) => {
       });
     }
     
-    console.log(`✅ Lock acquired! Proceeding with deployment...`);
-    console.log(`\n🚀 Deploying new token: ${name} (${symbol})`);
-    console.log(`   Deployer: ${normalizedDeployer}`);
-    console.log(`   Mint Amount: ${mintAmount} tokens`);
-    console.log(`   Max Mints: ${maxMintCount}`);
-    console.log(`   Price: ${price} ${paymentToken}`);
-    console.log(`   Excess Recipient: ${excessRecipient || normalizedDeployer}`);
-    console.log(`   💡 USDC should be sent to the token contract address (will be shown after deployment)`);
-
     // Process deployment fee payment
-    console.log(`\n💰 Processing deployment fee (1 USDC)...`);
-    
     const usdcAddress = network === 'base-sepolia' 
       ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
       : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
@@ -686,9 +629,6 @@ app.post("/api/deploy", async (req, res) => {
       const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
       const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
       
-      console.log(`   Executing transferWithAuthorization from ${authorization.from}...`);
-      console.log(`   💰 Gas: ${Number(maxFeePerGas) / 1e9} gwei (EIP-1559)`);
-      
       const paymentHash = await walletClient.writeContract({
         address: usdcAddress,
         abi: usdcAbi,
@@ -709,8 +649,6 @@ app.post("/api/deploy", async (req, res) => {
         maxPriorityFeePerGas,
       });
       
-      console.log(`   ✅ Payment transaction: ${paymentHash}`);
-      
       const paymentReceipt = await publicClient.waitForTransactionReceipt({ 
         hash: paymentHash,
         confirmations: 1,
@@ -719,10 +657,7 @@ app.post("/api/deploy", async (req, res) => {
       if (paymentReceipt.status !== "success") {
         throw new Error("Payment transaction reverted");
       }
-      
-      console.log(`   ✅ Payment confirmed! Proceeding with deployment...`);
     } catch (error: any) {
-      console.error("❌ Payment failed:", error.message);
       return res.status(400).json({
         error: "Payment failed",
         message: error.message,
@@ -745,15 +680,12 @@ app.post("/api/deploy", async (req, res) => {
 
     // Deploy token
     const deployResult = await deployToken(deployConfig);
-    console.log(`✅ Token deployed to ${deployResult.address}`);
 
     // Save to database
     const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
-    console.log(`✅ Token saved to database`);
 
     // Commit transaction and release lock
     await client.query('COMMIT');
-    console.log(`🔓 Lock released`);
 
     // Cache will auto-expire after TTL (no manual invalidation needed)
 
@@ -785,14 +717,11 @@ app.post("/api/deploy", async (req, res) => {
       },
     });
   } catch (error: any) {
-    console.error("❌ Deploy error:", error.message);
-    
     // Rollback transaction and release lock
     try {
       await client.query('ROLLBACK');
-      console.log(`🔓 Lock released (rollback)`);
     } catch (rollbackError) {
-      console.error("❌ Rollback error:", rollbackError);
+      // Rollback failed
     }
     
     return res.status(500).json({
@@ -827,12 +756,10 @@ app.get("/api/tokens", async (req, res) => {
       try {
         const cached = await redis.get(cacheKey);
         if (cached) {
-          console.log(`✅ Cache HIT: ${cacheKey}`);
           return res.json(JSON.parse(cached));
         }
-        console.log(`📭 Cache MISS: ${cacheKey}`);
       } catch (cacheErr: any) {
-        console.warn(`⚠️  Redis read error: ${cacheErr.message}`);
+        // Redis read error
       }
     }
 
@@ -867,7 +794,7 @@ app.get("/api/tokens", async (req, res) => {
       // Batch read all chain data (200 calls → 1 call!)
       chainResults = await publicClient.multicall({ contracts, allowFailure: true });
     } catch (err: any) {
-      console.error(`⚠️  Multicall failed, using DB fallback: ${err.message}`);
+      // Multicall failed, using DB fallback
     }
 
     // Format tokens with chain data
@@ -926,15 +853,13 @@ app.get("/api/tokens", async (req, res) => {
     if (redis) {
       try {
         await redis.setex(cacheKey, cacheTTL, JSON.stringify(response));
-        console.log(`💾 Cached: ${cacheKey} (TTL: ${cacheTTL}s)`);
       } catch (cacheErr: any) {
-        console.warn(`⚠️  Redis write error: ${cacheErr.message}`);
+        // Redis write error
       }
     }
 
     return res.json(response);
   } catch (error: any) {
-    console.error("❌ Error fetching tokens:", error.message);
     return res.status(500).json({
       error: "Failed to fetch tokens",
       message: error.message,
@@ -959,11 +884,10 @@ app.get("/api/tokens/:address", async (req, res) => {
       try {
         const cached = await redis.get(cacheKey);
         if (cached) {
-          console.log(`✅ Cache HIT: ${cacheKey}`);
           return res.json(JSON.parse(cached));
         }
       } catch (cacheErr: any) {
-        console.warn(`⚠️  Redis read error: ${cacheErr.message}`);
+        // Redis read error
       }
     }
 
@@ -1039,15 +963,13 @@ app.get("/api/tokens/:address", async (req, res) => {
     if (redis) {
       try {
         await redis.setex(cacheKey, cacheTTL, JSON.stringify(response));
-        console.log(`💾 Cached token: ${address} (TTL: ${cacheTTL}s)`);
       } catch (cacheErr: any) {
-        console.warn(`⚠️  Redis write error: ${cacheErr.message}`);
+        // Redis write error
       }
     }
 
     return res.json(response);
   } catch (error: any) {
-    console.error("❌ Error fetching token info:", error.message);
     return res.status(500).json({
       error: "Failed to fetch token info",
       message: error.message,
@@ -1060,11 +982,6 @@ app.get("/api/tokens/:address", async (req, res) => {
  * Supports both x402 and traditional EIP-3009 payment methods
  */
 app.post("/api/mint/:address", async (req, res) => {
-  console.log(`\n🎨 POST /api/mint/:address received`);
-  console.log(`   Token: ${req.params.address}`);
-  console.log(`   Headers:`, JSON.stringify(req.headers, null, 2));
-  console.log(`   Body:`, JSON.stringify(req.body, null, 2));
-  
   try {
     const { address: tokenAddress } = req.params;
     const tokenContractAddress = tokenAddress as `0x${string}`;
@@ -1077,16 +994,10 @@ app.post("/api/mint/:address", async (req, res) => {
       });
     }
     
-    console.log(`📦 Batch mint quantity: ${quantity}`);
-    
     // 🔒 SECURITY: Payment verification is REQUIRED
     // Check payment method: x402 (X-PAYMENT header) or traditional (authorization body)
     const paymentHeader = req.headers['x-payment'] as string | undefined;
     const authorization = req.body.authorization;
-    
-    console.log(`🔍 Payment check:`);
-    console.log(`   X-PAYMENT header: ${paymentHeader ? 'present' : 'missing'}`);
-    console.log(`   Authorization body: ${authorization ? 'present' : 'missing'}`);
     
     // Determine payment mode
     const useX402 = !!paymentHeader && x402Enabled;
@@ -1125,12 +1036,6 @@ app.post("/api/mint/:address", async (req, res) => {
         accepts: [paymentRequirements], // Array of payment options
       };
       
-      console.log(`💳 Returning 402 Payment Required (x402 format)`);
-      console.log(`   Amount: ${totalPrice} USDC (${totalPriceWei.toString()} wei)`);
-      console.log(`   Recipient: ${tokenAddress}`);
-      console.log(`   Resource URL: ${paymentRequirements.resource}`);
-      console.log(`   x402 Response:`, JSON.stringify(x402Response, null, 2));
-      
       // Return 402 with x402 standard format
       // Set x402 version header for client detection
       res.setHeader('X-Payment-Required', 'x402');
@@ -1153,7 +1058,6 @@ app.post("/api/mint/:address", async (req, res) => {
     
     // Branch based on payment method
     if (useX402) {
-      console.log(`🔐 x402 payment mode detected`);
       paymentMode = "x402";
       
       // Get token price for x402 verification
@@ -1178,10 +1082,8 @@ app.post("/api/mint/:address", async (req, res) => {
       // Decode payment header to get payer
       const paymentPayload = JSON.parse(Buffer.from(paymentHeader!, 'base64').toString('utf-8'));
       payer = paymentPayload.payload?.authorization?.from as `0x${string}`;
-      console.log(`📦 x402 payment from: ${payer}`);
       
       // First verify the payment
-      console.log(`🔍 Verifying x402 payment...`);
       const verifyResult = await verifyX402Payment(paymentHeader!, tokenAddress, expectedPrice, quantity, req);
       
       if (!verifyResult.valid) {
@@ -1191,10 +1093,7 @@ app.post("/api/mint/:address", async (req, res) => {
         });
       }
       
-      console.log(`✅ x402 payment verified`);
-      
       // Then settle x402 payment (on-chain settlement)
-      console.log(`💰 Settling x402 payment...`);
       const settleResult = await settleX402Payment(paymentHeader!, tokenAddress, expectedPrice, quantity, req);
       
       if (!settleResult.success) {
@@ -1205,11 +1104,9 @@ app.post("/api/mint/:address", async (req, res) => {
       }
       
       paymentTxHash = settleResult.txHash;
-      console.log(`✅ x402 payment settled: ${paymentTxHash}`);
       
     } else {
       // Traditional EIP-3009 mode
-      console.log(`🆓 Traditional gasless payment mode`);
       paymentMode = "traditional";
       payer = authorization.from as `0x${string}`;
       
@@ -1233,14 +1130,11 @@ app.post("/api/mint/:address", async (req, res) => {
     
       // Verify authorization is to the correct token contract address
       if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
-        console.error(`❌ Invalid payment recipient: expected ${tokenAddress}, got ${authorization.to}`);
         return res.status(400).json({
           error: "Invalid payment recipient",
           message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
         });
       }
-      
-      console.log(`✅ Payment recipient verified: ${tokenAddress}`);
     
       // 🔒 CRITICAL: Verify payment amount matches token price * quantity
       let expectedPrice: bigint;
@@ -1271,7 +1165,6 @@ app.post("/api/mint/:address", async (req, res) => {
       
       const providedValue = BigInt(authorization.value);
       if (providedValue !== expectedPrice) {
-        console.error(`❌ Invalid payment amount: expected ${expectedPrice}, got ${providedValue}`);
         return res.status(400).json({
           error: "Invalid payment amount",
           message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei) for ${quantity}x mint, but got ${Number(providedValue) / 1e6} USDC`,
@@ -1279,8 +1172,6 @@ app.post("/api/mint/:address", async (req, res) => {
           provided: providedValue.toString(),
         });
       }
-      
-      console.log(`✅ Payment amount verified: ${Number(expectedPrice) / 1e6} USDC for ${quantity}x mint`);
     
       // Execute transferWithAuthorization (payment verification)
       try {
@@ -1320,8 +1211,6 @@ app.post("/api/mint/:address", async (req, res) => {
           maxPriorityFeePerGas,
         });
         
-        console.log(`✅ USDC transfer executed: ${authHash}`);
-        
         const authReceipt = await publicClient.waitForTransactionReceipt({ 
           hash: authHash,
           confirmations: 1,
@@ -1333,7 +1222,6 @@ app.post("/api/mint/:address", async (req, res) => {
         
         paymentTxHash = authHash;
       } catch (error: any) {
-        console.error("❌ transferWithAuthorization failed:", error.message);
         return res.status(400).json({
           error: "Payment verification failed",
           message: error.message,
@@ -1362,8 +1250,6 @@ app.post("/api/mint/:address", async (req, res) => {
       });
     }
 
-    console.log(`📥 Adding ${quantity}x mints to queue for ${payer} (token ${tokenAddress.slice(0, 10)}...)`);
-
     // Add quantity mints to queue (each with unique txHash)
     const queueIds: string[] = [];
     const timestamp = Date.now();
@@ -1381,7 +1267,6 @@ app.post("/api/mint/:address", async (req, res) => {
       });
 
       if (alreadyMinted) {
-        console.log(`⏭️  Skipping mint ${i + 1}/${quantity} - already minted`);
         continue;
       }
 
@@ -1396,7 +1281,6 @@ app.post("/api/mint/:address", async (req, res) => {
       );
       
       queueIds.push(queueId);
-      console.log(`✅ Added mint ${i + 1}/${quantity} to queue: ${queueId}`);
     }
 
     if (queueIds.length === 0) {
@@ -1439,13 +1323,10 @@ app.post("/api/mint/:address", async (req, res) => {
       // Encode receipt as base64 for X-PAYMENT-RESPONSE header
       const receiptBase64 = Buffer.from(JSON.stringify(paymentReceipt)).toString('base64');
       res.setHeader('X-PAYMENT-RESPONSE', receiptBase64);
-      
-      console.log(`✅ x402 payment confirmed, added X-PAYMENT-RESPONSE header`);
     }
 
     return res.status(200).json(response);
   } catch (error: any) {
-    console.error("❌ Mint error:", error.message);
     return res.status(500).json({
       error: "Mint failed",
       message: error.message,
@@ -1469,7 +1350,6 @@ app.get("/api/queue/:queueId", async (req, res) => {
 
     return res.json(status);
   } catch (error: any) {
-    console.error("❌ Error fetching queue status:", error.message);
     return res.status(500).json({
       error: "Failed to fetch queue status",
       message: error.message,
@@ -1485,7 +1365,6 @@ app.get("/api/queue/stats", async (req, res) => {
     const stats = await queueProcessor.getQueueStats();
     return res.json(stats);
   } catch (error: any) {
-    console.error("❌ Error fetching queue stats:", error.message);
     return res.status(500).json({
       error: "Failed to fetch queue stats",
       message: error.message,
@@ -1520,24 +1399,19 @@ async function start() {
       lazyConnect: true,
     });
     await redis.connect();
-    console.log(`✅ Redis connected: ${redisUrl}`);
   } catch (err: any) {
-    console.warn(`⚠️  Redis not available (${err.message}), caching disabled`);
     redis = null;
   }
 
   // Initialize database
   try {
     await initDatabase(pool);
-    console.log("✅ Database initialized");
   } catch (error) {
-    console.error("❌ Database initialization failed:", error);
     process.exit(1);
   }
 
   // Start queue processor
   await queueProcessor.start();
-  console.log("✅ Queue processor started");
 
   // Get actual queue config from database
   let queueConfigDisplay = "enabled";
@@ -1554,23 +1428,7 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    console.log(`\n🚀 Multi-Token x402 Server running on port ${PORT}`);
-    console.log(`Network: ${network}`);
-    console.log(`Excess Recipient: ${excessRecipient ? getAddress(excessRecipient) : 'Not configured (will use deployer)'}`);
-    console.log(`Server Address: ${account.address}`);
-    console.log(`Database: ✅ Enabled`);
-    console.log(`Redis Cache: ${redis ? '✅ Enabled' : '❌ Disabled'}`);
-    console.log(`Queue System: ${queueConfigDisplay}`);
-    console.log(`x402 Protocol: ${x402Enabled ? `✅ Enabled (${x402FacilitatorUrl})` : '❌ Disabled'}`);
-    console.log(`\n💡 LP Deployment: Run standalone service with 'npm run lp-deployer'`);
-    console.log(`\nEndpoints:`);
-    console.log(`  POST /api/deploy - Deploy new token`);
-    console.log(`  GET /api/tokens - List all tokens (cached)`);
-    console.log(`  GET /api/tokens/:address - Get token info (cached)`);
-    console.log(`  POST /api/mint/:address - Mint tokens (queued)`);
-    console.log(`  GET /api/queue/:queueId - Check queue status`);
-    console.log(`  GET /api/queue/stats - Queue statistics`);
-    console.log(`  GET /health - Health check`);
+    // Server started
   });
 }
 
@@ -1578,7 +1436,6 @@ start().catch(console.error);
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  console.log('\n📛 SIGTERM received, shutting down gracefully...');
   queueProcessor.stop();
   if (redis) await redis.quit();
   await pool.end();
@@ -1586,7 +1443,6 @@ process.on('SIGTERM', async () => {
 });
 
 process.on('SIGINT', async () => {
-  console.log('\n📛 SIGINT received, shutting down gracefully...');
   queueProcessor.stop();
   if (redis) await redis.quit();
   await pool.end();
