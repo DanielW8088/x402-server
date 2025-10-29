@@ -56,6 +56,7 @@ function isValidHttpUrl(urlString: string): boolean {
 
 // Environment variables
 const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as `0x${string}`;
+const minterPrivateKey = process.env.MINTER_PRIVATE_KEY as `0x${string}`; // Separate wallet for minting (needs MINTER_ROLE)
 const excessRecipient = process.env.EXCESS_RECIPIENT_ADDRESS as `0x${string}`; // Address to receive excess USDC from LP deployment
 const network = (process.env.NETWORK || "base-sepolia") as "base-sepolia" | "base";
 
@@ -70,6 +71,7 @@ const useDatabase = !!databaseUrl;
 // Validation
 const missingVars: string[] = [];
 if (!serverPrivateKey) missingVars.push("SERVER_PRIVATE_KEY");
+if (!minterPrivateKey) missingVars.push("MINTER_PRIVATE_KEY");
 if (!databaseUrl) missingVars.push("DATABASE_URL");
 
 if (missingVars.length > 0) {
@@ -132,30 +134,47 @@ let redis: Redis | null = null;
 
 // Viem setup
 const chain = network === "base-sepolia" ? baseSepolia : base;
-const account = privateKeyToAccount(serverPrivateKey);
+
+// SERVER wallet: for receiving USDC payments
+const serverAccount = privateKeyToAccount(serverPrivateKey);
+
+// MINTER wallet: for executing mint transactions (needs MINTER_ROLE on token contracts)
+const minterAccount = privateKeyToAccount(minterPrivateKey);
 
 // RPC URL configuration
 const rpcUrl = network === "base-sepolia" 
   ? (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org")
   : (process.env.BASE_RPC_URL || "https://mainnet.base.org");
 
-const walletClient = createWalletClient({
-  account,
+// Server wallet client (for USDC payments)
+const serverWalletClient = createWalletClient({
+  account: serverAccount,
   chain,
   transport: http(rpcUrl),
-}) as any; // Type assertion to avoid viem version conflicts
+}) as any;
+
+// Minter wallet client (for mint transactions)
+const minterWalletClient = createWalletClient({
+  account: minterAccount,
+  chain,
+  transport: http(rpcUrl),
+}) as any;
 
 const publicClient = createPublicClient({
   chain,
   transport: http(rpcUrl),
 }) as any; // Type assertion to avoid viem version conflicts
 
+// Keep backward compatibility: walletClient points to server wallet
+const walletClient = serverWalletClient;
+const account = serverAccount;
+
 // Create a combined client with both public and wallet capabilities for x402 settle
 // x402 settle needs verifyTypedData (from public) and transaction signing (from wallet)
 const combinedClient = {
   ...publicClient,
-  ...walletClient,
-  account,
+  ...serverWalletClient,
+  account: serverAccount,
   chain,
   transport: http(rpcUrl),
 } as any;
@@ -203,9 +222,10 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // Initialize queue processor (no default token for multi-token mode)
+// Use MINTER wallet for executing mint transactions (needs MINTER_ROLE)
 const queueProcessor = new MintQueueProcessor(
   pool,
-  walletClient,
+  minterWalletClient,  // Use MINTER wallet, not SERVER wallet
   publicClient
 );
 
@@ -1428,7 +1448,18 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    // Server started
+    console.log(`\n🚀 Multi-Token Mint Server Started`);
+    console.log(`   Port: ${PORT}`);
+    console.log(`   Network: ${network}`);
+    console.log(`   Database: ✅ Connected`);
+    console.log(`   Redis: ${redis ? '✅ Connected' : '⚠️  Disabled'}`);
+    console.log(`\n💰 Wallet Configuration:`);
+    console.log(`   SERVER (USDC payments): ${serverAccount.address}`);
+    console.log(`   MINTER (mint execution): ${minterAccount.address}`);
+    console.log(`\n⚙️  Queue Processors:`);
+    console.log(`   Mint Queue: ${queueConfigDisplay}`);
+    console.log(`   x402: ${x402Enabled ? '✅ Enabled' : '❌ Disabled'}`);
+    console.log(``);
   });
 }
 
