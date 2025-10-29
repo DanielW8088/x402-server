@@ -8,6 +8,8 @@
     "deploy:mainnet": "hardhat run scripts/deployToken.js --network base",
     "deploy:launchtool:sepolia": "hardhat run scripts/deployLaunchTool.js --network baseSepolia",
     "deploy:launchtool:mainnet": "hardhat run scripts/deployLaunchTool.js --network base",
+    "deploy:liquidity:sepolia": "hardhat run scripts/deployLiquidityForToken.js --network baseSepolia",
+    "deploy:liquidity:mainnet": "hardhat run scripts/deployLiquidityForToken.js --network base",
     "grant:sepolia": "hardhat run scripts/grantMinterRole.js --network baseSepolia",
     "grant:mainnet": "hardhat run scripts/grantMinterRole.js --network base",
     "check:sepolia": "hardhat run scripts/checkMinterRole.js --network baseSepolia",
@@ -18,12 +20,11 @@
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
-    "dotenv": "^16.4.7",
-    "hardhat": "^2.22.0"
-  },
-  "dependencies": {
-    "@openzeppelin/contracts": "^5.4.0",
+    "@openzeppelin/contracts": "^3.4.2",
     "@uniswap/v3-core": "^1.0.1",
-    "@uniswap/v3-periphery": "^1.4.4"
+    "@uniswap/v3-periphery": "^1.4.1",
+    "dotenv": "^16.6.1",
+    "ethers": "^6.15.0",
+    "hardhat": "^2.26.3"
   }
 }

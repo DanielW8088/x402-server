@@ -9,16 +9,17 @@ async function main() {
     let UNISWAP_V3_POSITION_MANAGER = ""; 
 
     // if deploy on base sepolia
-    if (chain.chainId === 84532) {
+    if (chain.chainId === 84532n) {
         // Use a different admin for base sepolia
-        UNISWAP_V3_FACTORY = "0x1F98431c8a0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24D98523631AE4a59f267346ea31F984";
+        UNISWAP_V3_FACTORY = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24";
         UNISWAP_V3_POSITION_MANAGER = "0x27F971cb582BF9E50F397e4d29a5C7A34f11faA2";
     }
-    else if (chain.chainId === 8453) {
+    else if (chain.chainId === 8453n) {
         // Use the mainnet admin
         UNISWAP_V3_FACTORY = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
         UNISWAP_V3_POSITION_MANAGER = "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1";
     } else {
+        console.log("Unsupported chain ID:", chain.chainId);
         throw new Error("Unsupported network");
     }
 
