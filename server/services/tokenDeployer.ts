@@ -450,12 +450,16 @@ export async function getAllTokens(pool: Pool, options: {
   isActive?: boolean;
   limit?: number;
   offset?: number;
+  search?: string;
+  sortBy?: 'mintCount' | 'created' | 'volume';
+  withTotal?: boolean;
 } = {}) {
   // Optimized: Join mint_history to get 24h stats in single query
   let query = `
     SELECT 
       t.*,
-      COUNT(m.id) FILTER (WHERE m.completed_at > NOW() - INTERVAL '24 hours') as mint_count_24h
+      COUNT(m.id) FILTER (WHERE m.completed_at > NOW() - INTERVAL '24 hours') as mint_count_24h,
+      COUNT(m.id) as total_mints
     FROM deployed_tokens t
     LEFT JOIN mint_history m ON m.token_address = t.address
     WHERE 1=1
@@ -478,7 +482,29 @@ export async function getAllTokens(pool: Pool, options: {
     values.push(options.isActive);
   }
 
-  query += ' GROUP BY t.id ORDER BY t.created_at DESC';
+  // Search by token name, symbol, or address
+  if (options.search) {
+    const searchTerm = options.search.toLowerCase().trim();
+    query += ` AND (
+      LOWER(t.name) LIKE $${paramIndex} OR 
+      LOWER(t.symbol) LIKE $${paramIndex} OR 
+      LOWER(t.address) LIKE $${paramIndex}
+    )`;
+    values.push(`%${searchTerm}%`);
+    paramIndex++;
+  }
+
+  query += ' GROUP BY t.id';
+
+  // Sort logic: launched tokens first, then by specified criteria
+  const sortBy = options.sortBy || 'mintCount';
+  if (sortBy === 'mintCount') {
+    query += ' ORDER BY t.liquidity_deployed DESC, total_mints DESC, t.created_at DESC';
+  } else if (sortBy === 'volume') {
+    query += ' ORDER BY t.liquidity_deployed DESC, mint_count_24h DESC, total_mints DESC, t.created_at DESC';
+  } else {
+    query += ' ORDER BY t.liquidity_deployed DESC, t.created_at DESC';
+  }
 
   if (options.limit) {
     query += ` LIMIT $${paramIndex++}`;
@@ -491,6 +517,50 @@ export async function getAllTokens(pool: Pool, options: {
   }
 
   const result = await pool.query(query, values);
+  
+  // If withTotal is requested, get total count
+  if (options.withTotal) {
+    let countQuery = `
+      SELECT COUNT(DISTINCT t.id) as total
+      FROM deployed_tokens t
+      WHERE 1=1
+    `;
+    const countValues: any[] = [];
+    let countParamIndex = 1;
+
+    if (options.network) {
+      countQuery += ` AND t.network = $${countParamIndex++}`;
+      countValues.push(options.network);
+    }
+
+    if (options.deployer) {
+      countQuery += ` AND t.deployer_address = $${countParamIndex++}`;
+      countValues.push(options.deployer.toLowerCase());
+    }
+
+    if (options.isActive !== undefined) {
+      countQuery += ` AND t.is_active = $${countParamIndex++}`;
+      countValues.push(options.isActive);
+    }
+
+    if (options.search) {
+      const searchTerm = options.search.toLowerCase().trim();
+      countQuery += ` AND (
+        LOWER(t.name) LIKE $${countParamIndex} OR 
+        LOWER(t.symbol) LIKE $${countParamIndex} OR 
+        LOWER(t.address) LIKE $${countParamIndex}
+      )`;
+      countValues.push(`%${searchTerm}%`);
+      countParamIndex++;
+    }
+
+    const countResult = await pool.query(countQuery, countValues);
+    return {
+      tokens: result.rows,
+      total: parseInt(countResult.rows[0].total)
+    };
+  }
+
   return result.rows;
 }
 

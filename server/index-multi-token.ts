@@ -806,10 +806,17 @@ app.get("/api/tokens", async (req, res) => {
   }
 
   try {
-    const { deployer, limit = 50, offset = 0 } = req.query;
+    const { 
+      deployer, 
+      limit = 50, 
+      offset = 0,
+      search,
+      sortBy,
+      withTotal
+    } = req.query;
     
-    // Cache key includes query params for proper cache isolation
-    const cacheKey = `tokens:${network}:${deployer || 'all'}:${limit}:${offset}`;
+    // Cache key includes all query params for proper cache isolation
+    const cacheKey = `tokens:${network}:${deployer || 'all'}:${limit}:${offset}:${search || 'none'}:${sortBy || 'default'}:${withTotal || 'false'}`;
     const cacheTTL = parseInt(process.env.TOKENS_CACHE_TTL || '30'); // 30 seconds default
     
     // Try cache first
@@ -824,13 +831,19 @@ app.get("/api/tokens", async (req, res) => {
       }
     }
 
-    const tokens = await getAllTokens(pool, {
+    const result = await getAllTokens(pool, {
       network,
       deployer: deployer as string,
       isActive: true,
       limit: parseInt(limit as string),
       offset: parseInt(offset as string),
+      search: search as string,
+      sortBy: (sortBy as 'mintCount' | 'created' | 'volume') || 'mintCount',
+      withTotal: withTotal === 'true',
     });
+
+    // Handle both array and object return types
+    const tokens = Array.isArray(result) ? result : result.tokens;
 
     if (tokens.length === 0) {
       return res.json({ tokens: [], total: 0 });
@@ -902,12 +915,12 @@ app.get("/api/tokens", async (req, res) => {
       };
     });
 
-    // Sort by 24h USDC volume (descending)
-    formattedTokens.sort((a, b) => b.volume24hUSDC - a.volume24hUSDC);
+    // Note: Sorting is now done in SQL query for better performance
+    // (launched tokens first, then by mint count or volume)
 
     const response = {
       tokens: formattedTokens,
-      total: formattedTokens.length,
+      total: !Array.isArray(result) ? result.total : formattedTokens.length,
     };
     
     // Store in cache
