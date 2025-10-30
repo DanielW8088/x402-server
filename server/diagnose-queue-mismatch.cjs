@@ -88,7 +88,8 @@ async function main() {
         pq.error as payment_error,
         pq.created_at as payment_created,
         COUNT(mq.id) as mint_count,
-        COUNT(CASE WHEN mq.status = 'completed' THEN 1 END) as completed_mints
+        COUNT(CASE WHEN mq.status = 'completed' THEN 1 END) as completed_mints,
+        COUNT(CASE WHEN mq.status = 'pending' THEN 1 END) as pending_mints
       FROM payment_queue pq
       LEFT JOIN mint_queue mq 
         ON mq.payer_address = pq.payer 
@@ -109,12 +110,12 @@ async function main() {
                 console.log(`     Payer: ${row.payer}`);
                 console.log(`     Status: ${row.payment_status}`);
                 console.log(`     Error: ${row.payment_error}`);
-                console.log(`     Mint Items: ${row.mint_count} (${row.completed_mints} completed)`);
+                console.log(`     Mint Items: ${row.mint_count} (pending: ${row.pending_mints}, completed: ${row.completed_mints})`);
                 console.log(`     Created: ${row.payment_created}`);
                 console.log('');
             });
 
-            console.log('💡 Recommendation: Clean up these orphaned mint queue items');
+            console.log('💡 Fix: Run cleanup-failed-mints.cjs to clean up these orphaned items');
         } else {
             console.log('\n✅ No failed payments with mint queue items found (last 24h)');
         }

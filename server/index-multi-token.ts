@@ -1366,6 +1366,69 @@ app.post("/api/mint/:address", async (req, res) => {
             paymentQueueId,
           });
         }
+        
+        // 🔧 FIX: For traditional payment mode, mints are added by the payment callback
+        // Return early here to prevent duplicate mint queue entries
+        console.log(`✅ Traditional payment completed, mints will be added by callback`);
+        
+        if (!pool) {
+          return res.status(500).json({
+            error: "Database not configured",
+            message: "Cannot verify mint queue items without database",
+          });
+        }
+        
+        // Wait for callback to create mint queue items (with timeout)
+        let mintQueueItems: any;
+        const callbackWaitStart = Date.now();
+        const callbackMaxWait = 5000; // 5 seconds
+        
+        while (Date.now() - callbackWaitStart < callbackMaxWait) {
+          mintQueueItems = await pool.query(
+            `SELECT id, status FROM mint_queue 
+             WHERE payer_address = $1 
+             AND token_address = $2 
+             AND payment_tx_hash = $3
+             ORDER BY created_at DESC
+             LIMIT $4`,
+            [payer, tokenAddress, paymentTxHash, quantity]
+          );
+          
+          if (mintQueueItems.rows.length === quantity) {
+            break; // All mints created by callback
+          }
+          
+          // Wait a bit before checking again
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        
+        if (!mintQueueItems || mintQueueItems.rows.length === 0) {
+          return res.status(500).json({
+            error: "Mints not found",
+            message: "Payment completed but mint queue items were not created by callback",
+          });
+        }
+        
+        if (mintQueueItems.rows.length !== quantity) {
+          console.warn(`⚠️  Expected ${quantity} mints, but found ${mintQueueItems.rows.length}`);
+        }
+        
+        const callbackQueueIds = mintQueueItems.rows.map(row => row.id);
+        const firstQueueStatus = await queueProcessor.getQueueStatus(callbackQueueIds[0]);
+        
+        return res.status(200).json({
+          success: true,
+          message: `Added ${callbackQueueIds.length}x mint${callbackQueueIds.length > 1 ? 's' : ''} to queue (traditional payment)`,
+          queueId: callbackQueueIds[0],
+          queueIds: callbackQueueIds,
+          quantity: callbackQueueIds.length,
+          payer,
+          paymentMode: 'traditional',
+          status: firstQueueStatus.status,
+          queuePosition: firstQueueStatus.queuePosition,
+          estimatedWaitSeconds: firstQueueStatus.estimatedWaitSeconds,
+          paymentTxHash: paymentTxHash,
+        });
       } catch (error: any) {
         return res.status(400).json({
           error: "Failed to queue payment",
@@ -1374,6 +1437,8 @@ app.post("/api/mint/:address", async (req, res) => {
       }
     } // End of traditional payment mode
 
+    // 🔧 x402 payment mode continues here (no callback, so we add mints directly)
+    
     // Check remaining supply
     const [remainingSupply, mintAmountPerPayment] = await Promise.all([
       publicClient.readContract({
@@ -1395,7 +1460,7 @@ app.post("/api/mint/:address", async (req, res) => {
       });
     }
 
-    // Add quantity mints to queue (each with unique txHash)
+    // Add quantity mints to queue (each with unique txHash) - Only for x402 mode
     const queueIds: string[] = [];
     const timestamp = Date.now();
     

@@ -58,6 +58,9 @@ export class MintQueueProcessor {
   async start() {
     console.log(`🔄 Starting mint queue processor (batch interval: ${this.batchInterval}ms, max batch: ${this.maxBatchSize})`);
     
+    // 🔧 FIX: Reset stuck 'processing' items on startup (from server restart/crash)
+    await this.resetStuckItems();
+    
     // Initialize nonce manager (using 'once' strategy for performance)
     await this.nonceManager.initialize();
     
@@ -71,6 +74,34 @@ export class MintQueueProcessor {
     
     // Start recurring process
     this.scheduleNextBatch();
+  }
+
+  /**
+   * Reset items stuck in 'processing' state back to 'pending'
+   * This handles cases where server crashed/restarted during processing
+   */
+  private async resetStuckItems() {
+    try {
+      const result = await this.pool.query(
+        `UPDATE mint_queue 
+         SET status = 'pending', updated_at = NOW()
+         WHERE status = 'processing'
+         RETURNING id, payer_address, created_at`
+      );
+
+      if (result.rows.length > 0) {
+        console.log(`   🔄 Reset ${result.rows.length} stuck 'processing' items back to 'pending'`);
+        result.rows.slice(0, 3).forEach(row => {
+          console.log(`      - ${row.id.slice(0, 8)} (${row.payer_address.slice(0, 8)}...)`);
+        });
+        if (result.rows.length > 3) {
+          console.log(`      ... and ${result.rows.length - 3} more`);
+        }
+      }
+    } catch (error: any) {
+      console.error('⚠️  Failed to reset stuck items:', error.message);
+      // Don't throw - allow service to start anyway
+    }
   }
 
   /**
@@ -173,11 +204,13 @@ export class MintQueueProcessor {
       );
       const queuePosition = positionResult.rows[0].position;
 
-      // Insert into queue
+      // Insert into queue with ON CONFLICT to handle rare race conditions
       const result = await client.query(
         `INSERT INTO mint_queue 
         (payer_address, payment_tx_hash, authorization_data, tx_hash_bytes32, token_address, payment_type, queue_position) 
         VALUES ($1, $2, $3, $4, $5, $6, $7) 
+        ON CONFLICT (tx_hash_bytes32) DO UPDATE 
+          SET updated_at = NOW()
         RETURNING id`,
         [
           payerAddress,
@@ -283,12 +316,75 @@ export class MintQueueProcessor {
       const addresses: `0x${string}`[] = items.map((item) => item.payer_address as `0x${string}`);
       const txHashes: `0x${string}`[] = items.map((item) => item.tx_hash_bytes32 as `0x${string}`);
 
+      // 🔧 FIX: Check on-chain status before processing (防止重复发送)
+      // This prevents re-sending transactions that were already sent before a restart
+      const alreadyMintedChecks = await Promise.all(
+        txHashes.map(txHash => 
+          this.publicClient.readContract({
+            address: tokenAddress,
+            abi: tokenAbi,
+            functionName: "hasMinted",
+            args: [txHash],
+          })
+        )
+      );
+
+      // Filter out items that are already minted on-chain
+      const itemsToProcess = items.filter((_, index) => !alreadyMintedChecks[index]);
+      const alreadyMintedItems = items.filter((_, index) => alreadyMintedChecks[index]);
+
+      // Mark already minted items as completed immediately
+      if (alreadyMintedItems.length > 0) {
+        console.log(`   ⚠️  ${alreadyMintedItems.length} items already minted on-chain, skipping...`);
+        
+        const client = await this.pool.connect();
+        try {
+          await client.query("BEGIN");
+          
+          for (const item of alreadyMintedItems) {
+            // Mark as completed in queue
+            await client.query(
+              `UPDATE mint_queue 
+               SET status = 'completed', processed_at = NOW(), updated_at = NOW()
+               WHERE id = $1`,
+              [item.id]
+            );
+            
+            // Move to history
+            await client.query(
+              `INSERT INTO mint_history 
+               (payer_address, tx_hash_bytes32, token_address, mint_tx_hash, amount, payment_type, completed_at)
+               VALUES ($1, $2, $3, $4, $5, $6, NOW())
+               ON CONFLICT (tx_hash_bytes32) DO NOTHING`,
+              [item.payer_address, item.tx_hash_bytes32, tokenAddress, 'already-minted', '0', item.payment_type]
+            );
+          }
+          
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          console.error(`   ❌ Failed to mark already-minted items:`, err);
+        } finally {
+          client.release();
+        }
+      }
+
+      // If all items were already minted, return early
+      if (itemsToProcess.length === 0) {
+        console.log(`   ✅ All items already minted, skipping batch`);
+        return;
+      }
+
+      // Continue with remaining items
+      const addressesToProcess = itemsToProcess.map((item) => item.payer_address as `0x${string}`);
+      const txHashesToProcess = itemsToProcess.map((item) => item.tx_hash_bytes32 as `0x${string}`);
+
       // Mark as processing
       await this.pool.query(
         `UPDATE mint_queue 
          SET status = 'processing', updated_at = NOW() 
          WHERE id = ANY($1)`,
-        [items.map((item) => item.id)]
+        [itemsToProcess.map((item) => item.id)]
       );
       
       // Get nonce for this transaction (using cached nonce for performance)
@@ -308,7 +404,7 @@ export class MintQueueProcessor {
         }),
       ]);
 
-      const totalRequired = mintAmount * BigInt(items.length);
+      const totalRequired = mintAmount * BigInt(itemsToProcess.length);
       if (remainingSupply < totalRequired) {
         throw new Error(`Insufficient supply: need ${totalRequired}, have ${remainingSupply}`);
       }
@@ -327,13 +423,13 @@ export class MintQueueProcessor {
       let hash: `0x${string}`;
       let gasLimit: bigint;
       
-      if (items.length === 1) {
+      if (itemsToProcess.length === 1) {
         gasLimit = 150000n; // 降低单个 mint 的 gas limit
         hash = await this.walletClient.writeContract({
           address: tokenAddress,
           abi: tokenAbi,
           functionName: "mint",
-          args: [addresses[0], txHashes[0]],
+          args: [addressesToProcess[0], txHashesToProcess[0]],
           account: this.account,
           gas: gasLimit,
           maxFeePerGas,
@@ -342,12 +438,12 @@ export class MintQueueProcessor {
         } as any);
       } else {
         // 批量更省：基础 100k + 每个地址 50k
-        gasLimit = BigInt(100000 + 50000 * items.length);
+        gasLimit = BigInt(100000 + 50000 * itemsToProcess.length);
         hash = await this.walletClient.writeContract({
           address: tokenAddress,
           abi: tokenAbi,
           functionName: "batchMint",
-          args: [addresses, txHashes],
+          args: [addressesToProcess, txHashesToProcess],
           account: this.account,
           gas: gasLimit,
           maxFeePerGas,
@@ -362,7 +458,7 @@ export class MintQueueProcessor {
       await this.pool.query(
         `INSERT INTO batch_mints (batch_tx_hash, mint_count, status) 
          VALUES ($1, $2, 'pending')`,
-        [hash, items.length]
+        [hash, itemsToProcess.length]
       );
 
       // Wait for confirmation
@@ -377,9 +473,9 @@ export class MintQueueProcessor {
       const effectiveGasPrice = receipt.effectiveGasPrice || 0n;
       const actualCostWei = actualGasUsed * effectiveGasPrice;
       const actualCostEth = Number(actualCostWei) / 1e18;
-      const actualCostPerUser = actualCostEth / items.length;
+      const actualCostPerUser = actualCostEth / itemsToProcess.length;
       
-      console.log(`✅ Confirmed: ${items.length} mints | Cost: ${actualCostEth.toFixed(6)} ETH ($${(actualCostEth * 2500).toFixed(2)}) | Per user: $${(actualCostPerUser * 2500).toFixed(4)}\n`);
+      console.log(`✅ Confirmed: ${itemsToProcess.length} mints | Cost: ${actualCostEth.toFixed(6)} ETH ($${(actualCostEth * 2500).toFixed(2)}) | Per user: $${(actualCostPerUser * 2500).toFixed(4)}\n`);
 
       if (receipt.status !== "success") {
         throw new Error(`Transaction reverted: ${hash}`);
@@ -399,7 +495,7 @@ export class MintQueueProcessor {
       try {
         await client.query("BEGIN");
 
-        for (const item of items) {
+        for (const item of itemsToProcess) {
           // Update queue status
           await client.query(
             `UPDATE mint_queue 
@@ -440,12 +536,13 @@ export class MintQueueProcessor {
         await this.nonceManager.handleFailedNonce(nonce);
       }
 
-      // Mark items as failed
+      // 🔧 FIX: Only mark THIS batch's items as failed, not ALL 'processing' items
+      // This prevents marking unrelated concurrent batches as failed
       await this.pool.query(
         `UPDATE mint_queue 
          SET status = 'failed', error_message = $1, retry_count = retry_count + 1 
-         WHERE status = 'processing'`,
-        [error.message]
+         WHERE id = ANY($2)`,
+        [error.message, items.map((item) => item.id)]
       );
     }
   }
