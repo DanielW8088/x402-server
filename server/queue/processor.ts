@@ -29,6 +29,10 @@ export class MintQueueProcessor {
   private batchInterval: number = 10000; // 10 seconds
   private maxBatchSize: number = 500; // Increased from 50 to 500 to handle bulk mints
   private processorInterval: NodeJS.Timeout | null = null;
+  
+  // Queue status cache to avoid expensive COUNT queries on every poll
+  private queueStatusCache: Map<string, { data: any; timestamp: number }> = new Map();
+  private cacheTimeout: number = 5000; // Cache for 5 seconds
 
   constructor(
     pool: Pool,
@@ -257,8 +261,13 @@ export class MintQueueProcessor {
       for (const [tokenAddr, tokenItems] of itemsByToken.entries()) {
         await this.processBatchForToken(tokenAddr as `0x${string}`, tokenItems);
       }
+      
+      // Clear cache after batch processing (positions have changed)
+      this.clearQueueCache();
     } catch (error: any) {
       console.error("❌ Batch processing error:", error.message);
+      // Also clear cache on error to force refresh
+      this.clearQueueCache();
     } finally {
       this.isProcessing = false;
     }
@@ -443,8 +452,18 @@ export class MintQueueProcessor {
 
   /**
    * Get queue status for a specific item by ID
+   * Now with dynamic queue position calculation and caching
    */
   async getQueueStatus(queueId: string) {
+    // Check cache first
+    const now = Date.now();
+    const cached = this.queueStatusCache.get(queueId);
+    
+    if (cached && now - cached.timestamp < this.cacheTimeout) {
+      // Return cached data if still fresh
+      return cached.data;
+    }
+    
     const result = await this.pool.query(
       `SELECT 
         id, 
@@ -460,8 +479,15 @@ export class MintQueueProcessor {
         payment_type,
         created_at,
         updated_at,
-        processed_at
-      FROM mint_queue 
+        processed_at,
+        -- Dynamically calculate current queue position
+        (
+          SELECT COUNT(*) 
+          FROM mint_queue mq2 
+          WHERE mq2.status = 'pending' 
+          AND mq2.created_at < mq.created_at
+        ) + 1 as current_queue_position
+      FROM mint_queue mq
       WHERE id = $1`,
       [queueId]
     );
@@ -472,17 +498,52 @@ export class MintQueueProcessor {
     
     const row = result.rows[0];
     
-    // Calculate estimated wait time based on queue position
+    // Use dynamic position for pending items
+    const currentPosition = row.status === 'pending' 
+      ? parseInt(row.current_queue_position) 
+      : 0;
+    
+    // Calculate estimated wait time based on batch processing
     let estimatedWaitSeconds = 0;
-    if (row.queue_position && row.status === 'pending') {
-      estimatedWaitSeconds = row.queue_position * 10; // rough estimate: 10s per position
+    if (currentPosition > 0) {
+      // More accurate estimate based on batch size and interval
+      const batchSize = this.maxBatchSize || 500;
+      const batchInterval = this.batchInterval / 1000 || 10; // Convert to seconds
+      const estimatedBatches = Math.ceil(currentPosition / batchSize);
+      estimatedWaitSeconds = estimatedBatches * batchInterval;
     }
     
-    return {
+    const statusData = {
       ...row,
-      queuePosition: row.queue_position,
+      queuePosition: currentPosition,  // Use dynamic position
       estimatedWaitSeconds,
     };
+    
+    // Cache the result (only for pending items, completed/failed don't change)
+    if (row.status === 'pending') {
+      this.queueStatusCache.set(queueId, {
+        data: statusData,
+        timestamp: now,
+      });
+    } else {
+      // Remove from cache if completed/failed
+      this.queueStatusCache.delete(queueId);
+    }
+    
+    return statusData;
+  }
+  
+  /**
+   * Clear cache for specific queue items (called after batch processing)
+   */
+  private clearQueueCache(queueIds?: string[]) {
+    if (queueIds && queueIds.length > 0) {
+      // Clear specific items
+      queueIds.forEach(id => this.queueStatusCache.delete(id));
+    } else {
+      // Clear all cache
+      this.queueStatusCache.clear();
+    }
   }
 
   /**

@@ -496,14 +496,14 @@ export async function getAllTokens(pool: Pool, options: {
 
   query += ' GROUP BY t.id';
 
-  // Sort logic: launched tokens first, then by specified criteria
+  // Sort logic: prioritize by mint count
   const sortBy = options.sortBy || 'mintCount';
   if (sortBy === 'mintCount') {
-    query += ' ORDER BY t.liquidity_deployed DESC, total_mints DESC, t.created_at DESC';
+    query += ' ORDER BY total_mints DESC, t.liquidity_deployed DESC, t.created_at DESC';
   } else if (sortBy === 'volume') {
-    query += ' ORDER BY t.liquidity_deployed DESC, mint_count_24h DESC, total_mints DESC, t.created_at DESC';
+    query += ' ORDER BY mint_count_24h DESC, total_mints DESC, t.liquidity_deployed DESC, t.created_at DESC';
   } else {
-    query += ' ORDER BY t.liquidity_deployed DESC, t.created_at DESC';
+    query += ' ORDER BY t.created_at DESC, t.liquidity_deployed DESC';
   }
 
   if (options.limit) {
