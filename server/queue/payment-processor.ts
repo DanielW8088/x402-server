@@ -57,7 +57,9 @@ export class PaymentQueueProcessor {
     this.publicClient = publicClient as any;
     this.chain = chain;
     this.account = account;
-    this.nonceManager = new NonceManager(account.address, publicClient);
+    // Use 'once' strategy for serial payment processing
+    // Only syncs nonce on init and after failures, preventing race conditions under high concurrency
+    this.nonceManager = new NonceManager(account.address, publicClient, 'once');
     this.onPaymentCompleted = onPaymentCompleted;
   }
 
