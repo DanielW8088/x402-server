@@ -30,7 +30,8 @@ export type PaymentCompletedCallback = (item: PaymentQueueItem, txHash: string) 
 
 /**
  * Payment Queue Processor
- * Handles USDC payment transactions serially to avoid nonce conflicts
+ * Handles USDC payment transactions in parallel batches
+ * Pre-assigns nonces to avoid conflicts while maintaining high throughput
  */
 export class PaymentQueueProcessor {
   private pool: Pool;
@@ -42,6 +43,7 @@ export class PaymentQueueProcessor {
   private processingInterval: NodeJS.Timeout | null = null;
   private isProcessing: boolean = false;
   private batchIntervalMs: number = 2000; // Process every 2000ms (2 seconds)
+  private batchSize: number = 10; // Number of payments to process in parallel per batch
   private onPaymentCompleted?: PaymentCompletedCallback;
 
   constructor(
@@ -57,8 +59,8 @@ export class PaymentQueueProcessor {
     this.publicClient = publicClient as any;
     this.chain = chain;
     this.account = account;
-    // Use 'once' strategy for serial payment processing
-    // Only syncs nonce on init and after failures, preventing race conditions under high concurrency
+    // Use 'once' strategy for batch payment processing
+    // Pre-assigns nonces sequentially, then sends all txs in parallel
     this.nonceManager = new NonceManager(account.address, publicClient, 'once');
     this.onPaymentCompleted = onPaymentCompleted;
   }
@@ -70,16 +72,23 @@ export class PaymentQueueProcessor {
     // Initialize nonce manager
     await this.nonceManager.initialize();
 
-    // Get batch interval from database
+    // Get batch settings from database
     try {
-      const result = await this.pool.query(`
+      const intervalResult = await this.pool.query(`
         SELECT value FROM system_settings WHERE key = 'payment_batch_interval_ms'
       `);
-      if (result.rows.length > 0) {
-        this.batchIntervalMs = parseInt(result.rows[0].value);
+      if (intervalResult.rows.length > 0) {
+        this.batchIntervalMs = parseInt(intervalResult.rows[0].value);
+      }
+
+      const sizeResult = await this.pool.query(`
+        SELECT value FROM system_settings WHERE key = 'payment_batch_size'
+      `);
+      if (sizeResult.rows.length > 0) {
+        this.batchSize = parseInt(sizeResult.rows[0].value);
       }
     } catch (err) {
-      // Use default interval if setting not found
+      // Use default settings if not found
     }
 
     // Start processing loop
@@ -88,7 +97,7 @@ export class PaymentQueueProcessor {
       this.batchIntervalMs
     );
 
-    console.log(`✅ PaymentQueueProcessor started (batch every ${this.batchIntervalMs}ms)`);
+    console.log(`✅ PaymentQueueProcessor started (batch every ${this.batchIntervalMs}ms, size: ${this.batchSize})`);
   }
 
   /**
@@ -155,8 +164,8 @@ export class PaymentQueueProcessor {
   }
 
   /**
-   * Process a batch of pending payments (serially, one at a time)
-   * Using LIMIT 1 to ensure strict serial processing and avoid nonce issues
+   * Process a batch of pending payments in parallel
+   * Pre-assigns nonces to each payment to avoid conflicts
    */
   private async processBatch(): Promise<void> {
     if (this.isProcessing) {
@@ -166,17 +175,48 @@ export class PaymentQueueProcessor {
     this.isProcessing = true;
 
     try {
-      // Get ONE pending payment (oldest first)
-      // Process one at a time to ensure nonce consistency
+      // Get multiple pending payments (oldest first)
       const result = await this.pool.query(
         `SELECT * FROM payment_queue 
          WHERE status = 'pending' 
          ORDER BY created_at ASC 
-         LIMIT 1`
+         LIMIT $1`,
+        [this.batchSize]
       );
 
-      if (result.rows.length > 0) {
-        await this.processPayment(result.rows[0]);
+      if (result.rows.length === 0) {
+        return; // No payments to process
+      }
+
+      console.log(`🔄 Processing ${result.rows.length} payments in parallel...`);
+
+      // Pre-assign nonces to all payments
+      const paymentsWithNonces = result.rows.map(row => ({
+        row,
+        nonce: this.nonceManager.getNextNonce()
+      }));
+
+      // Resolve all nonces (they're returned as promises from getNextNonce)
+      const resolvedPayments = await Promise.all(
+        paymentsWithNonces.map(async (p) => ({
+          row: p.row,
+          nonce: await p.nonce
+        }))
+      );
+
+      // Process all payments in parallel
+      const results = await Promise.allSettled(
+        resolvedPayments.map(p => this.processPayment(p.row, p.nonce))
+      );
+
+      // Log results
+      const succeeded = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      
+      if (failed > 0) {
+        console.log(`⚠️  Batch complete: ${succeeded} succeeded, ${failed} failed`);
+      } else {
+        console.log(`✅ Batch complete: ${succeeded} payments processed`);
       }
     } catch (error: any) {
       console.error('❌ Payment batch processing error:', error.message);
@@ -187,11 +227,13 @@ export class PaymentQueueProcessor {
 
   /**
    * Process a single payment transaction
+   * @param row Payment queue item
+   * @param preAssignedNonce Pre-assigned nonce for parallel processing
    */
-  private async processPayment(row: any): Promise<void> {
+  private async processPayment(row: any, preAssignedNonce: number): Promise<void> {
     const paymentId = row.id;
     const authorization = row.authorization;
-    let nonce: number | null = null;
+    const nonce = preAssignedNonce;
 
     try {
       // Mark as processing
@@ -199,9 +241,6 @@ export class PaymentQueueProcessor {
         `UPDATE payment_queue SET status = 'processing' WHERE id = $1`,
         [paymentId]
       );
-
-      // Get nonce from manager
-      nonce = await this.nonceManager.getNextNonce();
 
       // Parse signature
       const sig = authorization.signature.startsWith('0x')
@@ -294,10 +333,8 @@ export class PaymentQueueProcessor {
     } catch (error: any) {
       console.error(`❌ Payment failed: ${paymentId}`, error.message);
 
-      // Handle failed nonce (only if we got a nonce)
-      if (nonce !== null) {
-        await this.nonceManager.handleFailedNonce(nonce);
-      }
+      // Handle failed nonce to resync chain state
+      await this.nonceManager.handleFailedNonce(nonce);
 
       // Mark as failed
       await this.pool.query(
