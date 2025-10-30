@@ -23,6 +23,7 @@ import { createPublicClient, createWalletClient, http, parseAbi, encodeFunctionD
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import * as dotenv from "dotenv";
+import { createRPCBalancer } from "./lib/rpc-balancer.js";
 import { resolve } from "path";
 
 // Load environment variables from .env file (explicitly from current directory)
@@ -304,9 +305,16 @@ class StandaloneLPDeployer {
     // Network config
     this.network = process.env.NETWORK || "baseSepolia";
     const chain = this.network === "base" ? base : baseSepolia;
-    const rpcUrl = this.network === "base"
-      ? (process.env.BASE_RPC_URL || "https://mainnet.base.org")
-      : (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org");
+
+    // RPC Load Balancer - supports multiple RPC URLs
+    const rpcBalancer = createRPCBalancer(
+      this.network === "base"
+        ? process.env.BASE_RPC_URL
+        : process.env.BASE_SEPOLIA_RPC_URL,
+      this.network === "base"
+        ? "https://mainnet.base.org"
+        : "https://sepolia.base.org"
+    );
 
     // LaunchTool address from env
     this.launchToolAddress = process.env.LAUNCH_TOOL_ADDRESS as `0x${string}`;
@@ -316,14 +324,23 @@ class StandaloneLPDeployer {
       ? "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
       : "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24") as `0x${string}`;
 
+    // Create transports
+    const publicTransport = rpcBalancer.createTransport({
+      timeout: 30000,
+      retryCount: 3,
+      retryDelay: 1000,
+    });
+
+    const walletTransport = rpcBalancer.createTransport({
+      timeout: 60000,
+      retryCount: 3,
+      retryDelay: 1000,
+    });
+
     // Clients with retry and rate limiting
     this.publicClient = createPublicClient({
       chain,
-      transport: http(rpcUrl, {
-        timeout: 30000, // 30 seconds timeout
-        retryCount: 3,
-        retryDelay: 1000, // 1 second between retries
-      }),
+      transport: publicTransport,
     });
 
     // Single wallet for all operations (token owner + LP deployer)
@@ -331,11 +348,7 @@ class StandaloneLPDeployer {
     this.walletClient = createWalletClient({
       account,
       chain,
-      transport: http(rpcUrl, {
-        timeout: 60000, // 60 seconds for transactions
-        retryCount: 3,
-        retryDelay: 1000,
-      }),
+      transport: walletTransport,
     });
 
     console.log(`╔════════════════════════════════════════════════════════════╗`);
@@ -343,7 +356,10 @@ class StandaloneLPDeployer {
     console.log(`╚════════════════════════════════════════════════════════════╝`);
     console.log(`\n🔧 Configuration:`);
     console.log(`   Network: ${this.network}`);
-    console.log(`   RPC: ${rpcUrl}`);
+    console.log(`   RPC Endpoints: ${rpcBalancer.getStatus().totalUrls}`);
+    rpcBalancer.getUrls().forEach((url, i) => {
+      console.log(`      ${i + 1}. ${url}`);
+    });
     console.log(`   Wallet: ${account.address}`);
     console.log(`   LaunchTool: ${this.launchToolAddress}`);
     console.log(`   Factory: ${this.factoryAddress}`);

@@ -21,6 +21,7 @@ import { MintQueueProcessor } from "./queue/processor.js";
 import { PaymentQueueProcessor } from "./queue/payment-processor.js";
 import { verify, settle } from "x402/facilitator";
 import { facilitator } from "@coinbase/x402";
+import { createRPCBalancer } from "./lib/rpc-balancer.js";
 
 config();
 
@@ -143,28 +144,45 @@ const serverAccount = privateKeyToAccount(serverPrivateKey);
 // MINTER wallet: for executing mint transactions (needs MINTER_ROLE on token contracts)
 const minterAccount = privateKeyToAccount(minterPrivateKey);
 
-// RPC URL configuration
-const rpcUrl = network === "base-sepolia" 
-  ? (process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org")
-  : (process.env.BASE_RPC_URL || "https://mainnet.base.org");
+// RPC Load Balancer - supports multiple RPC URLs for better throughput
+const rpcBalancer = createRPCBalancer(
+  network === "base-sepolia" 
+    ? process.env.BASE_SEPOLIA_RPC_URL
+    : process.env.BASE_RPC_URL,
+  network === "base-sepolia" 
+    ? "https://sepolia.base.org"
+    : "https://mainnet.base.org"
+);
+
+console.log(`🌐 RPC Configuration: ${rpcBalancer.getStatus().totalUrls} endpoint(s)`);
+rpcBalancer.getUrls().forEach((url, i) => {
+  console.log(`   ${i + 1}. ${url}`);
+});
+
+// Create transport with fallback support
+const rpcTransport = rpcBalancer.createTransport({
+  timeout: 30000,
+  retryCount: 3,
+  retryDelay: 1000,
+});
 
 // Server wallet client (for USDC payments)
 const serverWalletClient = createWalletClient({
   account: serverAccount,
   chain,
-  transport: http(rpcUrl),
+  transport: rpcTransport,
 }) as any;
 
 // Minter wallet client (for mint transactions)
 const minterWalletClient = createWalletClient({
   account: minterAccount,
   chain,
-  transport: http(rpcUrl),
+  transport: rpcTransport,
 }) as any;
 
 const publicClient = createPublicClient({
   chain,
-  transport: http(rpcUrl),
+  transport: rpcTransport,
 }) as any; // Type assertion to avoid viem version conflicts
 
 // Keep backward compatibility: walletClient points to server wallet
@@ -178,7 +196,7 @@ const combinedClient = {
   ...serverWalletClient,
   account: serverAccount,
   chain,
-  transport: http(rpcUrl),
+  transport: rpcTransport,
 } as any;
 
 // x402 is enabled by default, uses Coinbase facilitator
