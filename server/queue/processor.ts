@@ -189,8 +189,6 @@ export class MintQueueProcessor {
       await client.query("COMMIT");
 
       const queueId = result.rows[0].id;
-      console.log(`✅ Added to queue: ${queueId} (position: ${queuePosition}, payer: ${payerAddress})`);
-      
       return queueId;
     } catch (error: any) {
       await client.query("ROLLBACK");
@@ -206,7 +204,6 @@ export class MintQueueProcessor {
    */
   async processBatch() {
     if (this.isProcessing) {
-      console.log("⏭️  Skipping batch - already processing");
       return;
     }
 
@@ -243,11 +240,6 @@ export class MintQueueProcessor {
       }
 
       console.log(`\n📦 Processing batch of ${result.rows.length} mint(s)...`);
-      
-      // Log if we're processing more than maxBatchSize (due to grouping user mints)
-      if (result.rows.length > this.maxBatchSize) {
-        console.log(`   ℹ️  Extended batch to ${result.rows.length} items to keep user bulk mints together`);
-      }
 
       const items: QueueItem[] = result.rows;
 
@@ -259,19 +251,6 @@ export class MintQueueProcessor {
           itemsByToken.set(tokenAddr, []);
         }
         itemsByToken.get(tokenAddr)!.push(item);
-      }
-
-      console.log(`   Grouped into ${itemsByToken.size} token(s)`);
-      
-      // Log user distribution
-      const userCounts = new Map<string, number>();
-      for (const item of items) {
-        const count = userCounts.get(item.payer_address) || 0;
-        userCounts.set(item.payer_address, count + 1);
-      }
-      const bulkUsers = Array.from(userCounts.entries()).filter(([_, count]) => count > 1);
-      if (bulkUsers.length > 0) {
-        console.log(`   👥 Bulk mints: ${bulkUsers.map(([addr, count]) => `${addr.slice(0, 8)}... (${count}x)`).join(', ')}`);
       }
 
       // Process each token group
@@ -294,8 +273,6 @@ export class MintQueueProcessor {
     try {
       const addresses: `0x${string}`[] = items.map((item) => item.payer_address as `0x${string}`);
       const txHashes: `0x${string}`[] = items.map((item) => item.tx_hash_bytes32 as `0x${string}`);
-
-      console.log(`   Processing ${items.length} mint(s) for token ${tokenAddress.slice(0, 10)}...`);
 
       // Mark as processing
       await this.pool.query(
@@ -336,12 +313,6 @@ export class MintQueueProcessor {
       
       // Max fee = base fee * 1.1 + priority fee (只加 10% buffer，不是 300%)
       const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
-      
-      console.log(`   💰 EIP-1559 Gas (省钱模式):`);
-      console.log(`      - Base Fee: ${Number(baseFeePerGas) / 1e9} gwei`);
-      console.log(`      - Priority Fee: ${Number(maxPriorityFeePerGas) / 1e9} gwei`);
-      console.log(`      - Max Fee: ${Number(maxFeePerGas) / 1e9} gwei`);
-      console.log(`   🎨 Minting to ${items.length} address(es)...`);
 
       // Use batchMint for multiple addresses, mint for single address
       let hash: `0x${string}`;
@@ -375,15 +346,8 @@ export class MintQueueProcessor {
           nonce, // Use managed nonce
         } as any);
       }
-      
-      // 估算成本
-      const estimatedCostWei = gasLimit * maxFeePerGas;
-      const estimatedCostEth = Number(estimatedCostWei) / 1e18;
-      const costPerUser = estimatedCostEth / items.length;
-      console.log(`   💸 Estimated Cost: ${estimatedCostEth.toFixed(6)} ETH (~$${(estimatedCostEth * 2500).toFixed(2)} @ $2500/ETH)`);
-      console.log(`   👤 Per User: ${costPerUser.toFixed(6)} ETH (~$${(costPerUser * 2500).toFixed(4)})`)
 
-      console.log(`   ✅ Batch mint transaction sent: ${hash}`);
+      console.log(`   ✅ Tx sent: ${hash}`);
 
       // Record batch mint
       await this.pool.query(
@@ -393,7 +357,6 @@ export class MintQueueProcessor {
       );
 
       // Wait for confirmation
-      console.log(`⏳ Waiting for confirmation...`);
       const receipt = await this.publicClient.waitForTransactionReceipt({
         hash,
         confirmations: 1,
@@ -407,11 +370,7 @@ export class MintQueueProcessor {
       const actualCostEth = Number(actualCostWei) / 1e18;
       const actualCostPerUser = actualCostEth / items.length;
       
-      console.log(`✅ Batch confirmed in block ${receipt.blockNumber}`);
-      console.log(`   💰 Actual Cost: ${actualCostEth.toFixed(6)} ETH ($${(actualCostEth * 2500).toFixed(2)})`);
-      console.log(`   👤 Per User: ${actualCostPerUser.toFixed(6)} ETH ($${(actualCostPerUser * 2500).toFixed(4)})`);
-      console.log(`   ⛽ Gas Used: ${actualGasUsed} / ${gasLimit} (${(Number(actualGasUsed) * 100 / Number(gasLimit)).toFixed(1)}% efficiency)`);
-      console.log(`   💸 Effective Gas Price: ${Number(effectiveGasPrice) / 1e9} gwei`);
+      console.log(`✅ Confirmed: ${items.length} mints | Cost: ${actualCostEth.toFixed(6)} ETH ($${(actualCostEth * 2500).toFixed(2)}) | Per user: $${(actualCostPerUser * 2500).toFixed(4)}\n`);
 
       if (receipt.status !== "success") {
         throw new Error(`Transaction reverted: ${hash}`);
@@ -451,7 +410,6 @@ export class MintQueueProcessor {
         }
 
         await client.query("COMMIT");
-        console.log(`✅ Batch processing complete: ${items.length} mint(s) successful\n`);
         
         // Confirm nonce (transaction succeeded)
         if (nonce !== null) {

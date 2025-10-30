@@ -255,8 +255,6 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
         // Save to database
         const savedToken = await saveDeployedToken(pool, deployConfig, deployResult);
         
-        console.log(`✅ Token deployed after payment: ${savedToken.address}`);
-        
         // Trigger contract verification asynchronously (don't block deployment response)
         // Wait a few seconds for contract to be indexed by block explorer
         setTimeout(async () => {
@@ -318,8 +316,6 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
           
           queueIds.push(queueId);
         }
-        
-        console.log(`✅ Added ${quantity} mints to queue after payment: ${queueIds.join(', ')}`);
         
         return {
           success: true,
@@ -540,8 +536,6 @@ async function settleX402Payment(
       { quantity, x402: true } // Mark as x402 payment
     );
 
-    console.log(`✅ x402 payment queued: ${paymentId} for ${quantity} mints`);
-
     // Poll for payment completion (with timeout)
     const maxWaitTime = 30000; // 30 seconds
     const pollInterval = 500; // Check every 500ms
@@ -555,7 +549,6 @@ async function settleX402Payment(
       }
 
       if (status.status === 'completed') {
-        console.log(`✅ x402 payment completed: ${paymentId} (tx: ${status.tx_hash})`);
         return {
           success: true,
           txHash: status.tx_hash,
@@ -1316,20 +1309,45 @@ app.post("/api/mint/:address", async (req, res) => {
           { quantity } // metadata
         );
         
-        console.log(`✅ Payment queued: ${paymentQueueId} for mint to ${payer}`);
-        
-        // For now, return immediately with payment queue ID
-        // The payment will be processed asynchronously
-        // Client should poll for status or wait for webhook
-        return res.status(202).json({
-          success: true,
-          paymentQueueId,
-          message: "Payment queued for processing",
-          payer,
-          quantity,
-          tokenAddress,
-          status: "payment_pending",
-        });
+        // Poll for payment completion (with timeout) - same as x402 mode
+        const maxWaitTime = 30000; // 30 seconds
+        const pollInterval = 500; // Check every 500ms
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < maxWaitTime) {
+          const status = await paymentQueueProcessor.getPaymentStatus(paymentQueueId);
+          
+          if (!status) {
+            return res.status(500).json({
+              error: "Payment status not found",
+              message: "Unable to track payment processing"
+            });
+          }
+
+          if (status.status === 'completed') {
+            paymentTxHash = status.tx_hash;
+            break; // Continue to mint processing
+          }
+
+          if (status.status === 'failed') {
+            return res.status(400).json({
+              error: "Payment processing failed",
+              message: status.error || "Payment transaction failed",
+            });
+          }
+
+          // Still processing, wait and check again
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
+
+        // Check if timed out
+        if (!paymentTxHash) {
+          return res.status(408).json({
+            error: "Payment processing timeout",
+            message: "Payment is still being processed - check status later",
+            paymentQueueId,
+          });
+        }
       } catch (error: any) {
         return res.status(400).json({
           error: "Failed to queue payment",

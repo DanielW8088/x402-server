@@ -213,14 +213,12 @@ export class PaymentQueueProcessor {
       const succeeded = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.filter(r => r.status === 'rejected').length;
       
+      console.log(`✅ Batch complete: ${succeeded} succeeded${failed > 0 ? `, ${failed} failed` : ''}`);
+      
       if (failed > 0) {
-        console.log(`⚠️  Batch complete: ${succeeded} succeeded, ${failed} failed`);
         // If batch had failures, resync nonce ONCE to recover state
         // This prevents cascading nonce conflicts in subsequent batches
-        console.log(`🔄 Resyncing nonce after batch failures...`);
         await this.nonceManager.handleFailedNonce(resolvedPayments[0].nonce);
-      } else {
-        console.log(`✅ Batch complete: ${succeeded} payments processed`);
       }
     } catch (error: any) {
       console.error('❌ Payment batch processing error:', error.message);
@@ -366,8 +364,6 @@ export class PaymentQueueProcessor {
          WHERE id = $3`,
         [txHash, result ? JSON.stringify(result) : null, paymentId]
       );
-
-      console.log(`✅ Payment processed: ${paymentId} (tx: ${txHash})`);
 
     } catch (error: any) {
       console.error(`❌ Payment failed: ${paymentId}`, error.message);
