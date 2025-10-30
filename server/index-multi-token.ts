@@ -503,7 +503,25 @@ async function settleX402Payment(
     // Extract authorization from x402 payload
     const authorization = paymentPayload.payload?.authorization;
     if (!authorization) {
+      console.error('❌ Missing authorization in x402 payload');
       return { success: false, error: "Missing authorization in x402 payment payload" };
+    }
+
+    // x402 signature is in the payload root, not in authorization
+    // Reconstruct authorization with signature from paymentPayload
+    const fullAuthorization = {
+      ...authorization,
+      signature: paymentPayload.payload?.signature || paymentPayload.signature,
+    };
+
+    if (!fullAuthorization.signature) {
+      console.error('❌ Missing signature in x402 payload. Payload structure:', {
+        hasPayloadSignature: !!paymentPayload.payload?.signature,
+        hasRootSignature: !!paymentPayload.signature,
+        payloadKeys: Object.keys(paymentPayload),
+        innerPayloadKeys: paymentPayload.payload ? Object.keys(paymentPayload.payload) : []
+      });
+      return { success: false, error: "Missing signature in x402 payment payload" };
     }
 
     // Get USDC address for this network
@@ -514,8 +532,8 @@ async function settleX402Payment(
     // Queue the payment for serial processing (prevents nonce conflicts)
     const paymentId = await paymentQueueProcessor.addToQueue(
       'mint',
-      authorization,
-      authorization.from,
+      fullAuthorization,
+      fullAuthorization.from,
       expectedAmount.toString(),
       usdcAddress,
       tokenAddress,

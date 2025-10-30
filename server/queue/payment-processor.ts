@@ -246,16 +246,30 @@ export class PaymentQueueProcessor {
         [paymentId]
       );
 
-      // Parse signature
-      const sig = authorization.signature.startsWith('0x')
-        ? authorization.signature.slice(2)
-        : authorization.signature;
+      // Parse signature - handle both x402 format (v,r,s separate) and traditional format (signature string)
+      let v: number;
+      let r: `0x${string}`;
+      let s: `0x${string}`;
 
-      const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
-      const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
-      let v = parseInt(sig.slice(128, 130), 16);
+      if (authorization.signature) {
+        // Traditional EIP-3009 format with signature string
+        const sig = authorization.signature.startsWith('0x')
+          ? authorization.signature.slice(2)
+          : authorization.signature;
 
-      if (v === 0 || v === 1) v = v + 27;
+        r = `0x${sig.slice(0, 64)}` as `0x${string}`;
+        s = `0x${sig.slice(64, 128)}` as `0x${string}`;
+        v = parseInt(sig.slice(128, 130), 16);
+
+        if (v === 0 || v === 1) v = v + 27;
+      } else if (authorization.v !== undefined && authorization.r && authorization.s) {
+        // x402 format with v, r, s as separate fields
+        v = authorization.v;
+        r = authorization.r;
+        s = authorization.s;
+      } else {
+        throw new Error('Invalid authorization format: missing signature or v/r/s fields');
+      }
 
       // Get gas parameters with higher priority fee for batch processing
       const block = await this.publicClient.getBlock();

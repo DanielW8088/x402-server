@@ -13,6 +13,14 @@ module.exports = {
       viaIR: true,
     },
   },
+  paths: {
+    sources: "./contracts",
+    tests: "./test",
+    cache: "./cache",
+    artifacts: "./artifacts"
+  },
+  // Exclude PAYX.sol from compilation
+  exclude: ["**/PAYX.sol"],
   networks: {
     baseSepolia: {
       url: process.env.BASE_SEPOLIA_RPC || "https://sepolia.base.org",
