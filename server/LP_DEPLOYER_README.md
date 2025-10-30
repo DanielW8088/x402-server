@@ -84,11 +84,25 @@ npm run dev:lp-deployer
 ```
 
 **生产模式 (PM2):**
+
 ```bash
+# 方式 1: 启动所有服务（推荐）
+pm2 start ecosystem.config.cjs
+
+# 方式 2: 只启动 LP Deployer
+pm2 start ecosystem.config.cjs --only lp-deployer
+
+# 方式 3: 使用独立配置文件
 pm2 start ecosystem.lp-deployer.cjs
+
+# 查看日志
 pm2 logs lp-deployer
+
+# 查看状态
 pm2 status
 ```
+
+📖 **详细 PM2 使用指南**: [PM2_GUIDE.md](./PM2_GUIDE.md)
 
 ## 工作流程
 

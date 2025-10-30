@@ -12,6 +12,8 @@
  *   - LaunchTool deployed on target network
  *   - LP_DEPLOYER wallet with sufficient USDC
  */
+require('dotenv').config();
+
 module.exports = {
     apps: [
         {
