@@ -42,7 +42,7 @@ export class PaymentQueueProcessor {
   private nonceManager: NonceManager;
   private processingInterval: NodeJS.Timeout | null = null;
   private isProcessing: boolean = false;
-  private batchIntervalMs: number = 2000; // Process every 2000ms (2 seconds)
+  private batchIntervalMs: number = 4000; // Process every 4000ms (4 seconds) - give time for tx confirmations
   private batchSize: number = 10; // Number of payments to process in parallel per batch
   private onPaymentCompleted?: PaymentCompletedCallback;
 
@@ -215,6 +215,10 @@ export class PaymentQueueProcessor {
       
       if (failed > 0) {
         console.log(`⚠️  Batch complete: ${succeeded} succeeded, ${failed} failed`);
+        // If batch had failures, resync nonce ONCE to recover state
+        // This prevents cascading nonce conflicts in subsequent batches
+        console.log(`🔄 Resyncing nonce after batch failures...`);
+        await this.nonceManager.handleFailedNonce(resolvedPayments[0].nonce);
       } else {
         console.log(`✅ Batch complete: ${succeeded} payments processed`);
       }
@@ -333,8 +337,8 @@ export class PaymentQueueProcessor {
     } catch (error: any) {
       console.error(`❌ Payment failed: ${paymentId}`, error.message);
 
-      // Handle failed nonce to resync chain state
-      await this.nonceManager.handleFailedNonce(nonce);
+      // Don't resync nonce here - handled at batch level to prevent cascading conflicts
+      // Individual tx failures don't need immediate resync when processing in parallel batches
 
       // Mark as failed
       await this.pool.query(

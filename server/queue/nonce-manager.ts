@@ -39,7 +39,8 @@ export class NonceManager {
 
   /**
    * Sync nonce from chain
-   * Uses 'latest' block to get confirmed nonce, avoiding pending tx issues
+   * Uses 'pending' block to include pending transactions in nonce calculation
+   * This prevents nonce conflicts when processing in parallel batches
    */
   async syncFromChain(): Promise<void> {
     if (this.syncInProgress) {
@@ -52,14 +53,15 @@ export class NonceManager {
 
     this.syncInProgress = true;
     try {
-      // Use 'latest' instead of 'pending' to avoid issues with stuck transactions
+      // Use 'pending' to include pending transactions
+      // This gives us the next available nonce even if previous txs are still pending
       const nonce = await this.publicClient.getTransactionCount({
         address: this.walletAddress,
-        blockTag: 'latest',
+        blockTag: 'pending',
       });
       
       this.currentNonce = BigInt(nonce);
-      console.log(`🔄 Synced nonce from chain: ${this.currentNonce}`);
+      console.log(`🔄 Synced nonce from chain: ${this.currentNonce} (pending)`);
     } finally {
       this.syncInProgress = false;
     }
