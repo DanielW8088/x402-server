@@ -307,17 +307,32 @@ export class PaymentQueueProcessor {
         nonce, // Use managed nonce
       });
 
-      // Wait for confirmation
-      const receipt = await this.publicClient.waitForTransactionReceipt({
-        hash: txHash,
-        confirmations: 1,
-      });
+      // Wait for confirmation with extended timeout (60 seconds)
+      // In high-load scenarios, transactions may take longer to confirm
+      let receipt;
+      try {
+        receipt = await this.publicClient.waitForTransactionReceipt({
+          hash: txHash,
+          confirmations: 1,
+          timeout: 60_000, // 60 seconds (default is ~12 seconds)
+        });
 
-      if (receipt.status !== "success") {
-        throw new Error("Payment transaction reverted");
+        if (receipt.status !== "success") {
+          throw new Error("Payment transaction reverted");
+        }
+      } catch (timeoutError: any) {
+        // If timeout, we MUST throw error - cannot proceed without confirmation
+        // The tx might be reverted (insufficient balance, etc) and we can't know without receipt
+        // Security: Never mark as completed without verified receipt
+        if (timeoutError.message?.includes('timeout') || timeoutError.message?.includes('timed out')) {
+          console.log(`⚠️  Payment tx confirmation timeout: ${paymentId} (tx: ${txHash})`);
+          throw new Error(`Payment confirmation timeout - tx sent but not confirmed: ${txHash}`);
+        } else {
+          throw timeoutError; // Re-throw non-timeout errors
+        }
       }
 
-      // Confirm nonce
+      // Confirm nonce (only reached if receipt is verified)
       this.nonceManager.confirmNonce(nonce);
 
       // Call completion callback if provided (e.g., trigger deployment)
