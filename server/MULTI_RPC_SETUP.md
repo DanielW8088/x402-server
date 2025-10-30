@@ -83,6 +83,16 @@ BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/KEY1,https://base-mainnet.g.a
 
 ## 常见问题
 
+### Q: RPC URL末尾的斜杠会影响吗？
+不会。系统会自动标准化URL，去除末尾的斜杠。
+
+```bash
+# 这些配置都是等效的
+BASE_RPC_URL=https://example.com/
+BASE_RPC_URL=https://example.com///
+BASE_RPC_URL=https://example.com
+```
+
 ### Q: 需要几个RPC？
 - **开发/测试**: 1-2个免费RPC足够
 - **中等流量**: 3个（混合免费+付费）

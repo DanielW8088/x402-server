@@ -141,6 +141,24 @@ export class RPCBalancer {
 }
 ```
 
+### URL 标准化
+
+系统自动处理URL格式问题：
+
+```typescript
+// 自动去除末尾斜杠
+parseRPCUrls('https://example.com/', 'default')
+// → ['https://example.com']
+
+// 自动去除多个斜杠
+parseRPCUrls('https://example.com///', 'default')  
+// → ['https://example.com']
+
+// 自动trim空格
+parseRPCUrls(' https://example.com/ ', 'default')
+// → ['https://example.com']
+```
+
 ### 使用示例
 
 ```typescript

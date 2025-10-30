@@ -81,21 +81,30 @@ export class RPCBalancer {
 }
 
 /**
+ * Normalize RPC URL
+ * - Remove trailing slashes
+ * - Trim whitespace
+ */
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
+/**
  * Parse RPC URLs from environment variable
  * Supports comma-separated list: URL1,URL2,URL3
  */
 export function parseRPCUrls(envValue: string | undefined, defaultUrl: string): string[] {
   if (!envValue) {
-    return [defaultUrl];
+    return [normalizeUrl(defaultUrl)];
   }
 
-  // Split by comma and trim whitespace
+  // Split by comma, trim whitespace, and normalize URLs
   const urls = envValue
     .split(',')
-    .map(url => url.trim())
+    .map(url => normalizeUrl(url))
     .filter(url => url.length > 0);
 
-  return urls.length > 0 ? urls : [defaultUrl];
+  return urls.length > 0 ? urls : [normalizeUrl(defaultUrl)];
 }
 
 /**
