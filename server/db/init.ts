@@ -1,6 +1,11 @@
 import { Pool } from "pg";
 import { readFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+
+// ES module __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 /**
  * Initialize database with schema
@@ -23,7 +28,7 @@ export async function initDatabase(pool: Pool) {
       return;
     }
     
-    const schemaSQL = readFileSync(join(__dirname, "schema.sql"), "utf8");
+    const schemaSQL = readFileSync(join(__dirname, "schema-v3.sql"), "utf8");
     await pool.query(schemaSQL);
     
     console.log("✅ Database schema initialized successfully");

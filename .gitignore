@@ -2,12 +2,12 @@ node_modules/
 .env
 dist/
 *.log
-
+.env.local
 # Hardhat
 cache/
 artifacts/
 typechain-types/
-
+package-lock.json
 # IDEs
 .vscode/
 .idea/
@@ -18,4 +18,5 @@ typechain-types/
 # OS
 .DS_Store
 Thumbs.db
+0x402.io/
 

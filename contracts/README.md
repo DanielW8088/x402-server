@@ -1,14 +1,22 @@
-# PAYX Smart Contract
+# 0x402 Smart Contract
 
-Full-featured ERC20 token with x402 payment integration, EIP-3009 support, and Uniswap v4 auto-deployment.
+Full-featured ERC20 token with x402 payment integration, EIP-3009 support, and automated liquidity deployment.
+
+
+```bash
+npx hardhat compile
+```
 
 ## 📚 Documentation
 
 | Document | Description |
 |----------|-------------|
 | **[USAGE_GUIDE.md](./USAGE_GUIDE.md)** | 📖 **完整使用文档** - 所有合约功能和脚本使用方法 |
+| **[LAUNCHTOOL_DEPLOYMENT.md](./LAUNCHTOOL_DEPLOYMENT.md)** | 🔧 **LaunchTool部署指南** - 部署共享LP工具合约 |
+| **[LP_QUICK_START.md](./LP_QUICK_START.md)** | 🏊 **LP部署快速指南** - 5分钟完成流动性部署 |
+| **[LP_DEPLOYMENT_GUIDE.md](./LP_DEPLOYMENT_GUIDE.md)** | 📋 **LP部署详细文档** - 完整流程和故障排查 |
 | **[TOKENOMICS.md](./TOKENOMICS.md)** | 💰 代币经济学 - 20/80分配模型详解 |
-| **[contracts/PAYX.sol](./contracts/PAYX.sol)** | 📝 合约源代码 |
+| **[contracts/X402Token.sol](./contracts/X402Token.sol)** | 📝 合约源代码 |
 
 ## 🚀 Quick Start
 
@@ -21,7 +29,7 @@ cp .env.example .env
 # Edit .env and add PRIVATE_KEY
 
 # 3. Deploy contract
-npx hardhat run scripts/deployPAYX.js --network baseSepolia
+npx hardhat run scripts/deployToken.js --network baseSepolia
 
 # 4. Fund contract with USDC
 TOKEN_CONTRACT_ADDRESS=0x... USDC_AMOUNT=40000 \
@@ -30,6 +38,14 @@ TOKEN_CONTRACT_ADDRESS=0x... USDC_AMOUNT=40000 \
 # 5. Grant minter role to server
 TOKEN_CONTRACT_ADDRESS=0x... SERVER_ADDRESS=0x... \
   npx hardhat run scripts/grantRole.js --network baseSepolia
+
+# 6. Deploy LaunchTool (do this ONCE for all tokens)
+# Your DEPLOYER_PRIVATE_KEY address will automatically become the admin
+npx hardhat run scripts/deployLaunchTool.js --network baseSepolia
+  
+# 7. After minting completes, deploy LP
+TOKEN_ADDRESS=0x... LAUNCH_TOOL_ADDRESS=0x... TARGET_PRICE_USDC=0.5 \
+  npx hardhat run scripts/deployFullLiquidityFlow.js --network baseSepolia
 ```
 
 ## 📊 Contract Features
@@ -43,14 +59,14 @@ TOKEN_CONTRACT_ADDRESS=0x... SERVER_ADDRESS=0x... \
 
 ### x402 Integration
 - 💰 Users pay USDC to mint tokens
-- 🎯 Fixed mint amount per payment (10,000 PAYX)
+- 🎯 Fixed mint amount per payment (configurable)
 - 📈 Configurable max mint count (160,000 default)
 - 🔄 Automatic duplicate prevention
 
 ### Uniswap v4 Auto-deployment
 - 🏊 Auto-creates liquidity pool when max mints reached
-- 💧 Deploys 400M PAYX + 40k USDC (20/80 model)
-- 🎯 Initial price: 0.0001 USDC per PAYX
+- 💧 Deploys with 20/80 tokenomics (20% LP, 80% user mints)
+- 🎯 Initial price: configurable per deployment
 - 🔐 Protocol-owned liquidity (LP NFT to admin)
 
 ## 📦 Available Scripts
@@ -58,55 +74,83 @@ TOKEN_CONTRACT_ADDRESS=0x... SERVER_ADDRESS=0x... \
 ### Deployment
 ```bash
 # Deploy with default config (20/80 model)
-npx hardhat run scripts/deployPAYX.js --network baseSepolia
+npx hardhat run scripts/deployToken.js --network base
 
-# Deploy and test mint
-npx hardhat run scripts/deployAndMintPAYX.js --network baseSepolia
+# Deploy to testnet
+npx hardhat run scripts/deployToken.js --network baseSepolia
 ```
 
 ### Permission Management
 ```bash
-# Grant MINTER_ROLE
-TOKEN_CONTRACT_ADDRESS=0x... SERVER_ADDRESS=0x... \
-  npx hardhat run scripts/grantRole.js --network baseSepolia
+# Check MINTER_ROLE status
+TOKEN_ADDRESS=0x... npx hardhat run scripts/checkMinterRole.js --network base
+
+# Grant MINTER_ROLE to SERVER_PRIVATE_KEY address
+TOKEN_ADDRESS=0x... npx hardhat run scripts/grantMinterRole.js --network base
 ```
 
 ### Fund Management
 ```bash
 # Transfer USDC to contract
-TOKEN_CONTRACT_ADDRESS=0x... USDC_AMOUNT=40000 \
+TOKEN=0x... USDC_AMOUNT=40000 \
   npx hardhat run scripts/fundContract.js --network baseSepolia
 
 # Withdraw USDC from contract
-TOKEN_CONTRACT_ADDRESS=0x... USDC_AMOUNT=1000 \
+TOKEN=0x... USDC_AMOUNT=1000 \
   npx hardhat run scripts/withdrawUSDC.js --network baseSepolia
 
 # Emergency withdraw (before LP deployment)
-TOKEN_CONTRACT_ADDRESS=0x... \
+TOKEN=0x... \
   npx hardhat run scripts/emergencyWithdraw.js --network baseSepolia
 ```
 
 ### Status Check
 ```bash
 # Check contract status
-TOKEN_CONTRACT_ADDRESS=0x... \
-  npx hardhat run scripts/checkPAYX.js --network baseSepolia
+TOKEN_ADDRESS=0x... npx hardhat run scripts/checkMinterRole.js --network base
+
+# Check token and LP status
+TOKEN_ADDRESS=0x... npx hardhat run scripts/checkTokenLpStatus.js --network base
 ```
+
+### LP Deployment
+
+**Step 1**: 部署 LaunchTool（所有 token 共享，只需做一次）
+
+```bash
+# Deploy LaunchTool (do this ONCE)
+# Your DEPLOYER_PRIVATE_KEY address will automatically become the admin
+npx hardhat run scripts/deployLaunchTool.js --network base
+```
+
+See **[LAUNCHTOOL_DEPLOYMENT.md](./LAUNCHTOOL_DEPLOYMENT.md)** for detailed guide.
+
+**Step 2**: 为每个 token 部署 LP
+
+```bash
+# Deploy LP for each token (after minting completes)
+TOKEN_ADDRESS=0x... \
+LAUNCH_TOOL_ADDRESS=0x... \
+TARGET_PRICE_USDC=0.5 \
+  npx hardhat run scripts/deployFullLiquidityFlow.js --network base
+```
+
+See **[LP_QUICK_START.md](./LP_QUICK_START.md)** for detailed LP deployment guide.
 
 ## 🏗️ Contract Configuration
 
 ### 20/80 Distribution Model (Default)
 
 ```
-Total Supply:     2,000,000,000 PAYX (2B)
+Total Supply:     2,000,000,000 tokens (2B max)
 ════════════════════════════════════════
-LP Pool:            400,000,000 (20%)
-User Mints:       1,600,000,000 (80%)
+LP Pool:                    20% of supply
+User Mints:                 80% of supply
 ════════════════════════════════════════
-Mint Amount:           10,000 PAYX
-Max Mints:            160,000 times
-LP USDC:               40,000 USDC
-Initial Price:      $0.0001/PAYX
+Mint Amount:           Configurable
+Max Mints:            Configurable
+LP USDC:              Based on economics
+Initial Price:        Configurable
 ════════════════════════════════════════
 ```
 
@@ -172,7 +216,7 @@ function authorizationState(address, bytes32) external view returns (bool)
 ## ⚠️ Important Notes
 
 ### Before Deployment
-- [ ] Review tokenomics in `scripts/deployPAYX.js`
+- [ ] Configure deployment via API or update `scripts/deployToken.js`
 - [ ] Ensure you have enough ETH for gas
 - [ ] Prepare USDC for liquidity (40k for 20/80 model)
 
@@ -204,7 +248,7 @@ npx hardhat test
 
 # Deploy to localhost
 npx hardhat node
-npx hardhat run scripts/deployPAYX.js --network localhost
+npx hardhat run scripts/deployToken.js --network localhost
 
 # Console
 npx hardhat console --network baseSepolia
@@ -225,7 +269,7 @@ For complete guide including:
 
 - 📚 [Usage Guide](./USAGE_GUIDE.md) - Complete documentation
 - 💰 [Tokenomics](./TOKENOMICS.md) - Distribution model
-- 📝 [Contract Source](./contracts/PAYX.sol) - Full source code
+- 📝 [Contract Source](./contracts/X402Token.sol) - Full source code
 
 ## 📜 License
 

@@ -12,6 +12,13 @@ npm-debug.log*
 .env.local
 .env.production
 
+# SSL Certificates
+certs/
+*.pem
+*.key
+*.crt
+*.cer
+
 # Build output
 dist/
 build/

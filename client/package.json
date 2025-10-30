@@ -1,24 +1,28 @@
 {
   "name": "x402-token-mint-client",
-  "version": "1.0.0",
-  "description": "Client for token minting (x402 enabled)",
+  "version": "2.0.0",
+  "description": "Client for multi-token minting with x402 protocol (Coinbase CDP)",
   "main": "index.ts",
   "scripts": {
     "start": "tsx index.ts",
-    "start:fetch": "tsx index-x402-fetch.ts",
-    "start:axios": "tsx index-x402-standard.ts",
-    "start:manual": "tsx index-x402-working.ts",
-    "build": "tsc"
+    "start:direct": "tsx index-direct-payment.ts",
+    "batch": "tsx batch-mint.ts",
+    "build": "tsc",
+    "test": "./test-example.sh"
   },
   "dependencies": {
     "@coinbase/x402": "^0.6.6",
+    "@scure/bip32": "^1.5.0",
+    "@scure/bip39": "^1.4.0",
     "axios": "^1.7.9",
+    "better-sqlite3": "^11.8.1",
     "dotenv": "^16.6.1",
     "viem": "^2.38.4",
     "x402-axios": "^0.6.6",
     "x402-fetch": "^0.6.6"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
