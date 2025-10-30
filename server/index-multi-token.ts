@@ -1379,7 +1379,7 @@ app.post("/api/mint/:address", async (req, res) => {
         }
         
         // Wait for callback to create mint queue items (with timeout)
-        let mintQueueItems: any;
+        let mintQueueItems: { rows: Array<{ id: string; status: string }> } | undefined;
         const callbackWaitStart = Date.now();
         const callbackMaxWait = 5000; // 5 seconds
         
@@ -1413,7 +1413,7 @@ app.post("/api/mint/:address", async (req, res) => {
           console.warn(`⚠️  Expected ${quantity} mints, but found ${mintQueueItems.rows.length}`);
         }
         
-        const callbackQueueIds = mintQueueItems.rows.map(row => row.id);
+        const callbackQueueIds = mintQueueItems.rows.map((row: any) => row.id);
         const firstQueueStatus = await queueProcessor.getQueueStatus(callbackQueueIds[0]);
         
         return res.status(200).json({
