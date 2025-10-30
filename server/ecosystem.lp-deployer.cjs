@@ -17,7 +17,9 @@ module.exports = {
         {
             name: 'lp-deployer',
             script: 'lp-deployer-standalone.ts',
-            interpreter: 'tsx',
+            interpreter: 'npx',
+            interpreter_args: 'tsx',
+            cwd: process.cwd(), // Explicitly set working directory
             instances: 1,
             autorestart: true,
             watch: false,

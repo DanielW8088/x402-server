@@ -23,8 +23,10 @@ import { createPublicClient, createWalletClient, http, parseAbi, encodeFunctionD
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia, base } from "viem/chains";
 import * as dotenv from "dotenv";
+import { resolve } from "path";
 
-dotenv.config();
+// Load environment variables from .env file (explicitly from current directory)
+dotenv.config({ path: resolve(process.cwd(), '.env') });
 
 // ==================== Constants ====================
 
@@ -86,6 +88,13 @@ const poolAbi = parseAbi([
 ]);
 
 // ==================== Helper Functions ====================
+
+/**
+ * Sleep/delay utility to avoid rate limiting
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 /**
  * Compute integer square root using Newton's method
@@ -245,10 +254,14 @@ class StandaloneLPDeployer {
       ? "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
       : "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24") as `0x${string}`;
 
-    // Clients
+    // Clients with retry and rate limiting
     this.publicClient = createPublicClient({
       chain,
-      transport: http(rpcUrl),
+      transport: http(rpcUrl, {
+        timeout: 30000, // 30 seconds timeout
+        retryCount: 3,
+        retryDelay: 1000, // 1 second between retries
+      }),
     });
 
     // Single wallet for all operations (token owner + LP deployer)
@@ -256,7 +269,11 @@ class StandaloneLPDeployer {
     this.walletClient = createWalletClient({
       account,
       chain,
-      transport: http(rpcUrl),
+      transport: http(rpcUrl, {
+        timeout: 60000, // 60 seconds for transactions
+        retryCount: 3,
+        retryDelay: 1000,
+      }),
     });
 
     console.log(`╔════════════════════════════════════════════════════════════╗`);
@@ -342,6 +359,12 @@ class StandaloneLPDeployer {
             isRetry,
             retryCount
           );
+
+          // Add delay between processing tokens to avoid rate limiting
+          if (result.rows.length > 1) {
+            console.log(`   ⏳ Waiting 2s before next token...`);
+            await sleep(2000);
+          }
         } catch (error: any) {
           console.error(`   ❌ Error processing ${token.symbol}:`, error.message);
         }

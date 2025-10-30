@@ -192,6 +192,19 @@ curl -X POST https://sepolia.base.org \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
+### "429 Too Many Requests"
+```bash
+# 原因: RPC 请求频率过高
+# 解决: 使用私有 RPC（Alchemy/Infura）
+
+# 临时方案: 增加检查间隔
+# 修改 lp-deployer-standalone.ts:
+# private checkInterval: number = 120000; // 改为 2 分钟
+
+# 或使用速率更高的公共 RPC
+BASE_RPC_URL=https://base.llamarpc.com
+```
+
 ### 部署卡住
 ```bash
 # 查看交易状态
@@ -267,11 +280,29 @@ DATABASE_URL=postgresql://...
 
 ## 配置说明
 
-**可选 RPC 配置:**
+**RPC 配置（推荐使用私有 RPC）:**
+
+公共 RPC 有速率限制，频繁请求会返回 429 错误。
+
 ```bash
+# 公共 RPC（速率限制严格）
 BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 BASE_RPC_URL=https://mainnet.base.org
+
+# 推荐：使用 Alchemy / Infura / QuickNode 等服务
+BASE_SEPOLIA_RPC_URL=https://base-sepolia.g.alchemy.com/v2/YOUR_API_KEY
+BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_API_KEY
 ```
+
+**获取私有 RPC:**
+- Alchemy: https://dashboard.alchemy.com/
+- Infura: https://infura.io/
+- QuickNode: https://www.quicknode.com/
+
+**内置防护措施:**
+- ✅ 自动重试（3次，间隔1秒）
+- ✅ 请求超时（30-60秒）
+- ✅ Token 间延迟（2秒）
 
 **网络切换:**
 ```bash
