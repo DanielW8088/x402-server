@@ -486,7 +486,8 @@ async function verifyX402Payment(
 }
 
 /**
- * Settle x402 payment using facilitator
+ * Settle x402 payment through payment queue (avoids nonce conflicts)
+ * Extracts authorization from x402 payload and queues it for serial processing
  */
 async function settleX402Payment(
   paymentHeader: string,
@@ -499,43 +500,67 @@ async function settleX402Payment(
     // Decode X-PAYMENT header to get PaymentPayload
     const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
     
-    // Calculate price (must match 402 response and verify)
-    const pricePerMint = Number(expectedAmount) / (1e6 * quantity);
-    const totalPrice = pricePerMint * quantity;
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    
-    // Generate payment requirements (MUST match 402 response and verify!)
-    const paymentRequirements = generatePaymentRequirements(
+    // Extract authorization from x402 payload
+    const authorization = paymentPayload.payload?.authorization;
+    if (!authorization) {
+      return { success: false, error: "Missing authorization in x402 payment payload" };
+    }
+
+    // Get USDC address for this network
+    const usdcAddress = network === 'base-sepolia' 
+      ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+      : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+
+    // Queue the payment for serial processing (prevents nonce conflicts)
+    const paymentId = await paymentQueueProcessor.addToQueue(
+      'mint',
+      authorization,
+      authorization.from,
+      expectedAmount.toString(),
+      usdcAddress,
       tokenAddress,
-      quantity,
-      totalPrice,
-      expectedAmount,
-      baseUrl
+      { quantity, x402: true } // Mark as x402 payment
     );
-    
-    // Use x402 settle function with combined client to execute on-chain payment
-    // combinedClient has both verifyTypedData (from publicClient) and signing (from walletClient)
-    try {
-      const settleResult = await settle(
-        combinedClient,
-        paymentPayload,
-        paymentRequirements
-      );
+
+    console.log(`✅ x402 payment queued: ${paymentId} for ${quantity} mints`);
+
+    // Poll for payment completion (with timeout)
+    const maxWaitTime = 30000; // 30 seconds
+    const pollInterval = 500; // Check every 500ms
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitTime) {
+      const status = await paymentQueueProcessor.getPaymentStatus(paymentId);
       
-      if (settleResult.success) {
+      if (!status) {
+        return { success: false, error: "Payment status not found" };
+      }
+
+      if (status.status === 'completed') {
+        console.log(`✅ x402 payment completed: ${paymentId} (tx: ${status.tx_hash})`);
         return {
           success: true,
-          txHash: settleResult.transaction,
-        };
-      } else {
-        return { 
-          success: false, 
-          error: settleResult.errorReason || "Payment settlement failed" 
+          txHash: status.tx_hash,
         };
       }
-    } catch (settleError: any) {
-      return { success: false, error: settleError.message };
+
+      if (status.status === 'failed') {
+        return {
+          success: false,
+          error: status.error || "Payment processing failed",
+        };
+      }
+
+      // Still processing, wait and check again
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
     }
+
+    // Timeout
+    return { 
+      success: false, 
+      error: "Payment processing timeout - check payment status later" 
+    };
+
   } catch (error: any) {
     return { success: false, error: error.message };
   }
