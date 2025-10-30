@@ -309,7 +309,17 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
     }
     
     if (item.payment_type === 'mint' && item.metadata) {
-      // Payment for mint completed, add mints to mint queue
+      // 🔧 FIX: Skip x402 payments - they are handled by main flow
+      if (item.metadata.x402) {
+        console.log(`   ✅ x402 payment completed, mints will be added by main flow`);
+        return {
+          success: true,
+          x402: true,
+          message: 'x402 mints handled by main flow'
+        };
+      }
+      
+      // Payment for mint completed, add mints to mint queue (traditional mode only)
       const { quantity } = item.metadata;
       const tokenAddress = item.token_address!;
       const payer = item.payer;
@@ -326,7 +336,7 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
           const queueId = await queueProcessor.addToQueue(
             payer,
             txHashBytes32,
-            i === 0 ? txHash : undefined, // Only attach payment tx to first mint
+            txHash, // 🔧 FIX: Attach payment tx to ALL mints for tracking
             item.authorization,
             'traditional',
             tokenAddress
@@ -1484,7 +1494,7 @@ app.post("/api/mint/:address", async (req, res) => {
       const queueId = await queueProcessor.addToQueue(
         payer,
         txHashBytes32,
-        i === 0 ? paymentTxHash : undefined, // Only attach payment tx to first mint
+        paymentTxHash, // 🔧 FIX: Attach payment tx to ALL mints for tracking
         useX402 ? { paymentHeader } : authorization, // Store payment data based on mode
         paymentMode, // "x402" or "traditional"
         tokenAddress
