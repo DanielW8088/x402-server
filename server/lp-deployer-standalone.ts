@@ -120,29 +120,91 @@ function calculateSqrtPriceX96(
   decimals0: number,
   decimals1: number
 ): bigint {
-  // Convert price to high precision BigInt
-  const priceStr = priceToken1PerToken0.toFixed(18);
-  const priceParts = priceStr.split('.');
-  const integerPart = BigInt(priceParts[0]);
-  const decimalPart = priceParts[1] ? BigInt(priceParts[1].padEnd(18, '0')) : 0n;
-  const priceScaled = integerPart * (10n ** 18n) + decimalPart;
+  console.log(`[DEBUG] calculateSqrtPriceX96 inputs:`);
+  console.log(`  - priceToken1PerToken0: ${priceToken1PerToken0}`);
+  console.log(`  - decimals0: ${decimals0}, decimals1: ${decimals1}`);
 
-  let priceRaw: bigint;
-  const exponent = decimals1 - 18 - decimals0;
-  if (exponent >= 0) {
-    const multiplier = 10n ** BigInt(exponent);
-    priceRaw = priceScaled * multiplier;
-  } else {
-    const divisor = 10n ** BigInt(-exponent);
-    priceRaw = priceScaled / divisor;
+  // Validate input
+  if (priceToken1PerToken0 <= 0 || !isFinite(priceToken1PerToken0)) {
+    throw new Error(
+      `Invalid price input: ${priceToken1PerToken0}. Price must be positive and finite.`
+    );
   }
 
-  if (priceRaw <= 0n) {
-    throw new Error(`Invalid price calculation: priceRaw=${priceRaw}`);
+  // Method: Use string manipulation to avoid floating point precision issues
+  // Step 1: Convert price to string with enough precision
+  let priceStr = priceToken1PerToken0.toPrecision(15);
+  console.log(`  - priceStr: ${priceStr}`);
+  
+  // Remove scientific notation if present
+  if (priceStr.includes('e')) {
+    const [base, exp] = priceStr.split('e');
+    const exponent = parseInt(exp);
+    const numStr = base.replace('.', '');
+    const decimalPlaces = base.split('.')[1]?.length || 0;
+    
+    if (exponent >= 0) {
+      // Positive exponent - multiply
+      const zerosToAdd = exponent - decimalPlaces;
+      priceStr = zerosToAdd >= 0 
+        ? numStr + '0'.repeat(zerosToAdd)
+        : numStr.slice(0, numStr.length + zerosToAdd) + '.' + numStr.slice(numStr.length + zerosToAdd);
+    } else {
+      // Negative exponent - divide
+      const zerosToAdd = Math.abs(exponent) - 1;
+      priceStr = '0.' + '0'.repeat(zerosToAdd) + numStr;
+    }
+  }
+  
+  console.log(`  - priceStr (normalized): ${priceStr}`);
+  
+  // Step 2: Convert to BigInt ratio
+  // We'll use price = numerator / denominator
+  // Then calculate sqrt(price * 2^192)
+  
+  const parts = priceStr.split('.');
+  const integerPart = parts[0] || '0';
+  const decimalPart = parts[1] || '0';
+  
+  // Combine into numerator with 18 decimal places
+  const fullDecimal = (decimalPart + '0'.repeat(18)).slice(0, 18);
+  const numerator = BigInt(integerPart + fullDecimal);
+  const denominator = 10n ** 18n;
+  
+  console.log(`  - numerator: ${numerator.toString()}`);
+  console.log(`  - denominator: ${denominator.toString()}`);
+  
+  if (numerator <= 0n) {
+    throw new Error(
+      `Invalid price calculation: numerator=${numerator}, ` +
+      `price=${priceToken1PerToken0}, decimals0=${decimals0}, decimals1=${decimals1}`
+    );
   }
 
-  const sqrtPrice = sqrtBigInt(priceRaw * (2n ** 192n));
-  return sqrtPrice;
+  // Step 3: Calculate sqrtPriceX96
+  // sqrtPriceX96 = sqrt(price) * 2^96
+  // price = numerator / denominator
+  // sqrt(price) = sqrt(numerator) / sqrt(denominator)
+  // sqrtPriceX96 = sqrt(numerator) * 2^96 / sqrt(denominator)
+  
+  const Q96 = 2n ** 96n;
+  
+  // sqrt(numerator * 2^192) / sqrt(denominator)
+  const numeratorScaled = numerator * (Q96 ** 2n);
+  const sqrtNumerator = sqrtBigInt(numeratorScaled);
+  const sqrtDenominator = sqrtBigInt(denominator);
+  const sqrtPriceX96 = sqrtNumerator / sqrtDenominator;
+  
+  console.log(`  - sqrtPriceX96: ${sqrtPriceX96.toString()}`);
+
+  if (sqrtPriceX96 <= 0n) {
+    throw new Error(
+      `Invalid sqrtPriceX96 result: ${sqrtPriceX96}, ` +
+      `price=${priceToken1PerToken0}`
+    );
+  }
+
+  return sqrtPriceX96;
 }
 
 /**
@@ -637,7 +699,10 @@ class StandaloneLPDeployer {
     console.log(`  Balances:`);
     console.log(`    - Token: ${formatUnits(tokenBalance, TOKEN_DECIMALS)} ${symbol}`);
     console.log(`    - USDC: ${formatUnits(usdcBalance, USDC_DECIMALS)}`);
-    console.log(`  MINT_AMOUNT: ${formatUnits(mintAmount, TOKEN_DECIMALS)} ${symbol}`);
+    console.log(`  MINT_AMOUNT:`);
+    console.log(`    - Raw: ${mintAmount.toString()}`);
+    console.log(`    - Formatted: ${formatUnits(mintAmount, TOKEN_DECIMALS)} ${symbol}`);
+    console.log(`    - Type: ${typeof mintAmount}`);
 
     if (tokenBalance === 0n) {
       throw new Error("Insufficient token balance");
@@ -708,12 +773,34 @@ class StandaloneLPDeployer {
 
     // Target price: 1 USDC = MINT_AMOUNT tokens
     // So: 1 token = (1 / MINT_AMOUNT) USDC
+    console.log(`  [DEBUG] MINT_AMOUNT calculation:`);
+    console.log(`    - mintAmount (raw): ${mintAmount.toString()}`);
+    console.log(`    - TOKEN_DECIMALS: ${TOKEN_DECIMALS}`);
+    
     const mintAmountFloat = parseFloat(formatUnits(mintAmount, TOKEN_DECIMALS));
+    console.log(`    - mintAmountFloat: ${mintAmountFloat}`);
+    console.log(`    - mintAmountFloat type: ${typeof mintAmountFloat}`);
+    console.log(`    - mintAmountFloat === 0: ${mintAmountFloat === 0}`);
+    console.log(`    - mintAmount === 0n: ${mintAmount === 0n}`);
+    
+    if (mintAmountFloat === 0 || mintAmount === 0n || !isFinite(mintAmountFloat)) {
+      throw new Error(
+        `Invalid MINT_AMOUNT:\n` +
+        `  Raw: ${mintAmount.toString()}\n` +
+        `  Float: ${mintAmountFloat}\n` +
+        `  Decimals: ${TOKEN_DECIMALS}\n` +
+        `  MINT_AMOUNT cannot be zero or invalid.`
+      );
+    }
+    
     const pricePerToken = 1.0 / mintAmountFloat; // USDC per token
+    console.log(`    - pricePerToken (1/mintAmountFloat): ${pricePerToken}`);
+    console.log(`    - pricePerToken in scientific: ${pricePerToken.toExponential(10)}`);
 
     console.log(`  Target Price:`);
     console.log(`    - 1 USDC = ${mintAmountFloat} tokens`);
-    console.log(`    - 1 token = ${pricePerToken.toFixed(6)} USDC`);
+    console.log(`    - 1 token = ${pricePerToken.toFixed(10)} USDC`);
+    console.log(`    - MINT_AMOUNT (raw): ${mintAmount.toString()}`);
 
     // Calculate required USDC based on token balance
     const tokenAmountFloat = parseFloat(formatUnits(tokenBalance, TOKEN_DECIMALS));
@@ -756,17 +843,21 @@ class StandaloneLPDeployer {
       // token0 = USDC, token1 = Token
       // price = token1/token0 = Token/USDC = 1/pricePerToken
       priceToken1PerToken0 = 1.0 / pricePerToken;
+      console.log(`  Price Configuration:`);
+      console.log(`    - token0: USDC, token1: Token`);
+      console.log(`    - pricePerToken (USDC/Token): ${pricePerToken.toExponential(10)}`);
+      console.log(`    - priceToken1PerToken0 (Token/USDC): ${priceToken1PerToken0.toExponential(10)}`);
     } else {
       // token0 = Token, token1 = USDC
       // price = token1/token0 = USDC/Token = pricePerToken
       priceToken1PerToken0 = pricePerToken;
+      console.log(`  Price Configuration:`);
+      console.log(`    - token0: Token, token1: USDC`);
+      console.log(`    - pricePerToken (USDC/Token): ${pricePerToken.toExponential(10)}`);
+      console.log(`    - priceToken1PerToken0 (USDC/Token): ${priceToken1PerToken0.toExponential(10)}`);
     }
 
-    console.log(`  Price Configuration:`);
-    console.log(`    - Calculated price (token1/token0): ${priceToken1PerToken0}`);
-
     const sqrtPriceX96 = calculateSqrtPriceX96(priceToken1PerToken0, decimals0, decimals1);
-    console.log(`    - sqrtPriceX96: ${sqrtPriceX96.toString()}`);
 
     // Calculate tick range
     const currentTick = getTickAtSqrtRatio(sqrtPriceX96);

@@ -192,6 +192,27 @@ WHERE address = '0xYourTokenAddress';
 # 无需干预: Token 已成功部署
 ```
 
+### "Invalid price calculation: priceRaw=0"
+```bash
+# 原因: MINT_AMOUNT 为 0 或价格计算精度丢失
+# 检查:
+#   1. Token 的 MINT_AMOUNT() 函数是否返回 > 0
+#   2. MINT_AMOUNT 是否设置正确
+
+# 查看合约 MINT_AMOUNT:
+cast call <TOKEN_ADDRESS> "MINT_AMOUNT()(uint256)" --rpc-url $BASE_RPC_URL
+
+# 测试价格计算（本地）:
+cd server
+npx tsx test-price-calc.ts <MINT_AMOUNT_RAW>
+# 例如: npx tsx test-price-calc.ts 10000000000
+
+# 查看 PM2 日志中的详细调试信息:
+pm2 logs lp-deployer --lines 200 | grep -A 20 "DEBUG"
+
+# 状态: 记录错误，自动重试
+```
+
 ### 服务启动失败
 ```bash
 # 检查环境变量
