@@ -257,11 +257,17 @@ export class PaymentQueueProcessor {
 
       if (v === 0 || v === 1) v = v + 27;
 
-      // Get gas parameters
+      // Get gas parameters with higher priority fee for batch processing
       const block = await this.publicClient.getBlock();
       const baseFeePerGas = block.baseFeePerGas || 100000000n;
-      const maxPriorityFeePerGas = 1000000n; // 0.001 gwei
-      const maxFeePerGas = (baseFeePerGas * 110n) / 100n + maxPriorityFeePerGas;
+      
+      // Use higher priority fee (0.01 gwei) to ensure txs are picked up quickly
+      // Add small random jitter (0-20%) to reduce collision in batch sends
+      const basePriorityFee = 10000000n; // 0.01 gwei (10x higher than before)
+      const jitter = BigInt(Math.floor(Math.random() * 20)); // 0-19%
+      const maxPriorityFeePerGas = basePriorityFee + (basePriorityFee * jitter) / 100n;
+      
+      const maxFeePerGas = (baseFeePerGas * 120n) / 100n + maxPriorityFeePerGas; // 120% of base + priority
 
       // Execute transferWithAuthorization
       const txHash = await this.walletClient.writeContract({
