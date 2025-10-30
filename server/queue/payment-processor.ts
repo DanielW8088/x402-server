@@ -378,6 +378,32 @@ export class PaymentQueueProcessor {
          WHERE id = $2`,
         [error.message, paymentId]
       );
+
+      // 🔧 FIX: Clean up orphaned mint queue items for this failed payment
+      // Find and fail any pending/processing mints associated with this payment
+      try {
+        const cleanupResult = await this.pool.query(
+          `UPDATE mint_queue mq
+           SET status = 'failed', 
+               error_message = 'Payment failed: ' || $1,
+               updated_at = NOW()
+           FROM payment_queue pq
+           WHERE pq.id = $2
+           AND mq.payer_address = pq.payer
+           AND mq.token_address = pq.token_address
+           AND mq.status IN ('pending', 'processing')
+           AND mq.created_at BETWEEN pq.created_at - INTERVAL '2 minutes' AND pq.created_at + INTERVAL '2 minutes'
+           RETURNING mq.id`,
+          [error.message, paymentId]
+        );
+
+        if (cleanupResult.rows.length > 0) {
+          console.log(`   🧹 Cleaned up ${cleanupResult.rows.length} orphaned mint queue items`);
+        }
+      } catch (cleanupError: any) {
+        console.error(`   ⚠️  Failed to cleanup mint queue items:`, cleanupError.message);
+        // Don't throw - payment failure was already recorded
+      }
     }
   }
 
