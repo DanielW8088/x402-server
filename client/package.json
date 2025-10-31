@@ -7,6 +7,7 @@
     "start": "tsx index.ts",
     "start:direct": "tsx index-direct-payment.ts",
     "batch": "tsx batch-mint.ts",
+    "x402": "tsx batch-mint-x402.ts",
     "build": "tsc",
     "test": "./test-example.sh"
   },

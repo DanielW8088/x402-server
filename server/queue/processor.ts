@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { WalletClient, PublicClient, parseAbi, Account } from "viem";
 import { NonceManager } from "./nonce-manager.js";
+import { UserService } from "../services/userService.js";
 
 const tokenAbi = parseAbi([
   "function mint(address to, bytes32 txHash) external",
@@ -26,6 +27,7 @@ export class MintQueueProcessor {
   private account: Account;
   private nonceManager: NonceManager;
   private tokenContractAddress: `0x${string}` | null;
+  private userService: UserService | null;
   private isProcessing: boolean = false;
   private batchInterval: number = 1500; // 1.5 seconds (ultra high throughput mode)
   private maxBatchSize: number = 400; // 400 per batch (balance between speed and gas)
@@ -40,13 +42,15 @@ export class MintQueueProcessor {
     walletClient: WalletClient,
     publicClient: PublicClient,
     account: Account,
-    tokenContractAddress?: `0x${string}`
+    tokenContractAddress?: `0x${string}`,
+    userService?: UserService
   ) {
     this.pool = pool;
     this.walletClient = walletClient;
     this.publicClient = publicClient;
     this.account = account;
     this.tokenContractAddress = tokenContractAddress || null;
+    this.userService = userService || null;
     
     // Use 'once' strategy for high-frequency minting operations
     // Only syncs nonce on init and after failures, not before every tx
@@ -571,6 +575,33 @@ export class MintQueueProcessor {
         await client.query("COMMIT");
         
         console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] DB updated (took ${Date.now() - dbUpdateStart}ms)`);
+        
+        // Update user points for each minter (async, don't block)
+        if (this.userService) {
+          const uniquePayers = [...new Set(itemsToProcess.map(item => item.payer_address))];
+          const payerCounts = itemsToProcess.reduce((acc, item) => {
+            acc[item.payer_address] = (acc[item.payer_address] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>);
+          
+          // Update in background (don't wait)
+          Promise.all(
+            uniquePayers.map(async (payer) => {
+              try {
+                // Get or create user first
+                await this.userService!.getOrCreateUser(payer);
+                // Increment mint count by the number of mints for this user in this batch
+                const count = payerCounts[payer];
+                for (let i = 0; i < count; i++) {
+                  await this.userService!.incrementMintCount(payer);
+                }
+              } catch (err) {
+                console.error(`   ⚠️  Failed to update points for ${payer}:`, err);
+              }
+            })
+          ).catch(err => console.error('   ⚠️  Failed to update user points:', err));
+        }
+        
         console.log(`   🎯 Total batch time: ${Date.now() - batchStartTime}ms\n`);
         
         // Confirm nonce (transaction succeeded)

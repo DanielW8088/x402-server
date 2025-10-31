@@ -19,6 +19,7 @@ import {
 import { initDatabase } from "./db/init.js";
 import { MintQueueProcessor } from "./queue/processor.js";
 import { PaymentQueueProcessor } from "./queue/payment-processor.js";
+import { UserService } from "./services/userService.js";
 import { verify, settle } from "x402/facilitator";
 import { facilitator } from "@coinbase/x402";
 import { createRPCBalancer } from "./lib/rpc-balancer.js";
@@ -134,6 +135,7 @@ const pool = new Pool({
 // Redis setup (optional, graceful fallback) - will be initialized in start()
 const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 let redis: Redis | null = null;
+let userService: UserService;
 
 // Viem setup
 const chain = network === "base-sepolia" ? baseSepolia : base;
@@ -249,12 +251,8 @@ app.use(express.json());
 
 // Initialize queue processor (no default token for multi-token mode)
 // Use MINTER wallet for executing mint transactions (needs MINTER_ROLE)
-const queueProcessor = new MintQueueProcessor(
-  pool,
-  minterWalletClient,  // Use MINTER wallet, not SERVER wallet
-  publicClient,
-  minterAccount        // Account for nonce management
-);
+// Will be initialized with userService in start() function
+let queueProcessor: MintQueueProcessor;
 
 // Initialize payment queue processor for serial payment processing
 // Use SERVER wallet for receiving USDC payments (prevents nonce conflicts)
@@ -1709,6 +1707,188 @@ app.get("/api/queue/stats", async (req, res) => {
   }
 });
 
+// ==================== User & Points System APIs ====================
+
+/**
+ * Get or create user by wallet address
+ * GET /api/user/:address
+ */
+app.get("/api/user/:address", async (req, res) => {
+  try {
+    const { address } = req.params;
+
+    if (!isAddress(address)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+
+    const user = await userService.getOrCreateUser(address);
+    
+    return res.json({
+      success: true,
+      user,
+    });
+  } catch (error: any) {
+    console.error("Error fetching user:", error);
+    return res.status(500).json({
+      error: "Failed to fetch user",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * Use invitation code
+ * POST /api/user/:address/invite
+ * Body: { invitationCode: string }
+ */
+app.post("/api/user/:address/invite", async (req, res) => {
+  try {
+    const { address } = req.params;
+    const { invitationCode } = req.body;
+
+    if (!isAddress(address)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+
+    if (!invitationCode || typeof invitationCode !== 'string') {
+      return res.status(400).json({ error: "Invitation code is required" });
+    }
+
+    // Ensure user exists
+    await userService.getOrCreateUser(address);
+
+    // Use invitation code
+    const result = await userService.useInvitationCode(address, invitationCode);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.message,
+      });
+    }
+
+    return res.json(result);
+  } catch (error: any) {
+    console.error("Error using invitation code:", error);
+    return res.status(500).json({
+      error: "Failed to use invitation code",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * Get user rank
+ * GET /api/user/:address/rank
+ */
+app.get("/api/user/:address/rank", async (req, res) => {
+  try {
+    const { address } = req.params;
+
+    if (!isAddress(address)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+
+    const rank = await userService.getUserRank(address);
+
+    if (rank === null) {
+      return res.status(404).json({ error: "User not found in rankings" });
+    }
+
+    return res.json({
+      success: true,
+      rank,
+    });
+  } catch (error: any) {
+    console.error("Error fetching user rank:", error);
+    return res.status(500).json({
+      error: "Failed to fetch user rank",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * Get user's referrals
+ * GET /api/user/:address/referrals
+ */
+app.get("/api/user/:address/referrals", async (req, res) => {
+  try {
+    const { address } = req.params;
+
+    if (!isAddress(address)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+
+    const referrals = await userService.getUserReferrals(address);
+
+    return res.json({
+      success: true,
+      count: referrals.length,
+      referrals,
+    });
+  } catch (error: any) {
+    console.error("Error fetching referrals:", error);
+    return res.status(500).json({
+      error: "Failed to fetch referrals",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * Get leaderboard
+ * GET /api/leaderboard
+ * Query params: limit (default: 100), offset (default: 0)
+ */
+app.get("/api/leaderboard", async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    const leaderboard = await userService.getLeaderboard(limit, offset);
+    const stats = await userService.getLeaderboardStats();
+
+    return res.json({
+      success: true,
+      stats,
+      leaderboard,
+      pagination: {
+        limit,
+        offset,
+        total: stats.total_users,
+      },
+    });
+  } catch (error: any) {
+    console.error("Error fetching leaderboard:", error);
+    return res.status(500).json({
+      error: "Failed to fetch leaderboard",
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * Get leaderboard stats only
+ * GET /api/leaderboard/stats
+ */
+app.get("/api/leaderboard/stats", async (req, res) => {
+  try {
+    const stats = await userService.getLeaderboardStats();
+
+    return res.json({
+      success: true,
+      stats,
+    });
+  } catch (error: any) {
+    console.error("Error fetching leaderboard stats:", error);
+    return res.status(500).json({
+      error: "Failed to fetch leaderboard stats",
+      message: error.message,
+    });
+  }
+});
+
 // Health check
 app.get("/health", (req, res) => {
   res.json({
@@ -1746,6 +1926,19 @@ async function start() {
   } catch (error) {
     process.exit(1);
   }
+
+  // Initialize user service
+  userService = new UserService(pool, redis);
+
+  // Initialize queue processor with userService
+  queueProcessor = new MintQueueProcessor(
+    pool,
+    minterWalletClient,  // Use MINTER wallet, not SERVER wallet
+    publicClient,
+    minterAccount,       // Account for nonce management
+    undefined,           // No default token for multi-token mode
+    userService          // Pass userService for automatic points update
+  );
 
   // Start queue processors
   await queueProcessor.start();
