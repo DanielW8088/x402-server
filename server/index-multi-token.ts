@@ -381,6 +381,8 @@ function generateMintTxHash(payer: string, timestamp: number, tokenAddress: stri
  * Generate payment requirements (used for both 402 response and verification)
  * CRITICAL: payTo must be the token contract address (where payment goes)
  * asset is the USDC contract address (what token is being paid)
+ * 
+ * Includes inputSchema and outputSchema for x402scan discovery
  */
 function generatePaymentRequirements(
   tokenAddress: string,
@@ -395,7 +397,7 @@ function generatePaymentRequirements(
   
   return {
     scheme: "exact" as const,
-    description: `Mint ${quantity}x tokens for ${totalPrice} USDC`,
+    description: `Mint ${quantity}x AI agent tokens - Gasless minting on 0x402 protocol`,
     network: network as "base-sepolia" | "base",
     resource: `${baseUrl}/api/mint/${tokenAddress}`,
     mimeType: "application/json",
@@ -403,6 +405,48 @@ function generatePaymentRequirements(
     maxAmountRequired: totalPriceWei.toString(),
     maxTimeoutSeconds: 300,
     asset: usdcAddress, // Token being paid (USDC)
+    // Input schema for x402scan discovery
+    inputSchema: {
+      type: "object",
+      properties: {
+        quantity: {
+          type: "number",
+          description: "Number of tokens to mint (default: 1)",
+          default: 1,
+          minimum: 1
+        }
+      }
+    },
+    // Output schema for x402scan discovery
+    outputSchema: {
+      type: "object",
+      properties: {
+        success: {
+          type: "boolean",
+          description: "Whether the mint was successful"
+        },
+        tokenAddress: {
+          type: "string",
+          description: "Address of the minted token contract"
+        },
+        amount: {
+          type: "string",
+          description: "Amount of tokens minted (in wei)"
+        },
+        mint_tx_hash: {
+          type: "string",
+          description: "Transaction hash of the mint operation"
+        },
+        payment_tx_hash: {
+          type: "string",
+          description: "Transaction hash of the payment"
+        },
+        payer: {
+          type: "string",
+          description: "Address of the payer"
+        }
+      }
+    }
   };
 }
 
