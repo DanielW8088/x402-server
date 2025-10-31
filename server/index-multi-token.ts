@@ -470,6 +470,8 @@ async function verifyX402Payment(
     // Decode X-PAYMENT header to get PaymentPayload
     const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
     
+    console.log(`🔐 Payment payload value: ${paymentPayload.value}, expected: ${expectedAmount.toString()}`);
+    
     // Calculate price (must match 402 response)
     const pricePerMint = Number(expectedAmount) / (1e6 * quantity);
     const totalPrice = pricePerMint * quantity;
@@ -500,6 +502,12 @@ async function verifyX402Payment(
       paymentRequirements
       // Note: x402 SDK uses default facilitator (x402.org) or verifies locally
     );
+    
+    console.log('✅ Verify result:', {
+      isValid: verifyResult.isValid,
+      invalidReason: verifyResult.invalidReason,
+      payer: verifyResult.payer
+    });
     
     if (verifyResult.isValid) {
       return {
@@ -1181,6 +1189,8 @@ app.post("/api/mint/:address", async (req, res) => {
     const tokenContractAddress = tokenAddress as `0x${string}`;
     const quantity = req.body.quantity || 1; // Support batch minting
     
+    console.log(`📦 Request quantity: ${quantity}, body:`, JSON.stringify(req.body));
+    
     if (quantity < 1 || quantity > 10) {
       return res.status(400).json({
         error: "Invalid quantity",
@@ -1278,6 +1288,7 @@ app.post("/api/mint/:address", async (req, res) => {
       payer = paymentPayload.payload?.authorization?.from as `0x${string}`;
       
       // First verify the payment
+      console.log(`💰 Expected price: ${expectedPrice} wei for quantity ${quantity}`);
       const verifyResult = await verifyX402Payment(paymentHeader!, tokenAddress, expectedPrice, quantity, req);
       
       if (!verifyResult.valid) {
