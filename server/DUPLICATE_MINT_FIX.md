@@ -52,15 +52,48 @@ for (let i = 0; i < quantity; i++) {  // ⚠️ 重复！
 }
 ```
 
-### 为什么 x402 Mode 没问题？
+### x402 Mode 也有同样问题！
 
-x402 mode 不使用 payment queue callback，直接在主流程添加 mints，所以只添加一次。
+**x402 的双重添加流程：**
+
+#### 第一次添加：Payment Callback (第 311-346 行)
+
+```typescript
+// settleX402Payment 调用 paymentQueueProcessor.addToQueue
+await paymentQueueProcessor.addToQueue(
+  'mint',
+  fullAuthorization,
+  ...
+  { quantity, x402: true } // metadata
+);
+
+// Payment 完成后，callback 触发
+if (item.payment_type === 'mint' && item.metadata) {
+  const { quantity } = item.metadata;
+  // 第一次添加！
+  for (let i = 0; i < quantity; i++) {
+    await queueProcessor.addToQueue(...);
+  }
+}
+```
+
+#### 第二次添加：主 API 流程 (第 1467-1493 行)
+
+```typescript
+// settleX402Payment 返回成功后
+// x402 payment mode continues here
+for (let i = 0; i < quantity; i++) {  // ⚠️ 又添加一次！
+  await queueProcessor.addToQueue(...);
+}
+```
+
+**结果：x402 支付 1U → 也会收到 2x quantity mints！**
 
 ---
 
 ## ✅ 修复方案
 
-### 修改内容 (index-multi-token.ts)
+### 修复 1：Traditional Payment Mode
 
 **Traditional payment 完成后立即返回，不再继续执行后续的 mint 添加逻辑。**
 
@@ -84,12 +117,52 @@ return res.status(200).json({
   ...
 });
 // ← 不再继续执行下面的 for loop
+```
 
-// 🔧 下面的代码只为 x402 mode 执行
-// x402 payment mode continues here
-for (let i = 0; i < quantity; i++) {
-  await queueProcessor.addToQueue(...);
+### 修复 2：x402 Payment Mode
+
+**Callback 检测 x402 标志，跳过添加 mints（由主流程处理）**
+
+```typescript
+// payment-processor callback (第 311-320 行)
+if (item.payment_type === 'mint' && item.metadata) {
+  // 🔧 FIX: Skip x402 payments - they are handled by main flow
+  if (item.metadata.x402) {
+    console.log(`   ✅ x402 payment completed, mints will be added by main flow`);
+    return {
+      success: true,
+      x402: true,
+      message: 'x402 mints handled by main flow'
+    };
+  }
+  
+  // Traditional mode: add mints here
+  for (let i = 0; i < quantity; i++) {
+    await queueProcessor.addToQueue(...);
+  }
 }
+```
+
+### 修复 3：统一 payment_tx_hash 附加逻辑
+
+**所有 mints 都附加 payment_tx_hash（不只是第一个）**
+
+```typescript
+// Traditional callback (第 339 行)
+const queueId = await queueProcessor.addToQueue(
+  payer,
+  txHashBytes32,
+  txHash, // ✅ ALL mints 都附加
+  ...
+);
+
+// x402 main flow (第 1497 行)
+const queueId = await queueProcessor.addToQueue(
+  payer,
+  txHashBytes32,
+  paymentTxHash, // ✅ ALL mints 都附加
+  ...
+);
 ```
 
 ---
@@ -258,21 +331,26 @@ WHERE id IN (
 ### 修复前（Bug 存在）
 
 - **Traditional Payment Mode**: 
-  - 1U payment → 2 个 mints
-  - 10U payment (quantity=10) → 20 个 mints
+  - 1U payment → 2 个 mints ❌
+  - 10U payment (quantity=10) → 20 个 mints ❌
   - 用户多收到 100% 的 tokens
 
 - **x402 Payment Mode**:
-  - ✅ 正常（无影响）
+  - 1U payment → 2 个 mints ❌
+  - 10U payment (quantity=10) → 20 个 mints ❌
+  - 用户多收到 100% 的 tokens
 
 ### 修复后
 
 - **Traditional Payment Mode**:
   - 1U payment → 1 个 mint ✅
   - 10U payment (quantity=10) → 10 个 mints ✅
+  - Callback 添加，主流程 early return
 
 - **x402 Payment Mode**:
-  - ✅ 正常（无变化）
+  - 1U payment → 1 个 mint ✅
+  - 10U payment (quantity=10) → 10 个 mints ✅
+  - 主流程添加，callback 跳过
 
 ---
 

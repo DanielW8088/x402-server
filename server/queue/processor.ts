@@ -16,6 +16,7 @@ interface QueueItem {
   tx_hash_bytes32: string;
   payment_type: string;
   token_address?: string;
+  created_at?: Date;
 }
 
 export class MintQueueProcessor {
@@ -26,8 +27,8 @@ export class MintQueueProcessor {
   private nonceManager: NonceManager;
   private tokenContractAddress: `0x${string}` | null;
   private isProcessing: boolean = false;
-  private batchInterval: number = 10000; // 10 seconds
-  private maxBatchSize: number = 500; // Increased from 50 to 500 to handle bulk mints
+  private batchInterval: number = 1500; // 1.5 seconds (ultra high throughput mode)
+  private maxBatchSize: number = 400; // 400 per batch (balance between speed and gas)
   private processorInterval: NodeJS.Timeout | null = null;
   
   // Queue status cache to avoid expensive COUNT queries on every poll
@@ -262,7 +263,7 @@ export class MintQueueProcessor {
           FROM batch_candidates
           WHERE rn <= $1
         )
-        SELECT bc.id, bc.payer_address, bc.tx_hash_bytes32, bc.payment_type, bc.token_address
+        SELECT bc.id, bc.payer_address, bc.tx_hash_bytes32, bc.payment_type, bc.token_address, bc.created_at
         FROM batch_candidates bc
         INNER JOIN selected_payers sp 
           ON bc.payer_address = sp.payer_address 
@@ -310,28 +311,51 @@ export class MintQueueProcessor {
    * Process a batch for a specific token
    */
   private async processBatchForToken(tokenAddress: `0x${string}`, items: QueueItem[]) {
+    const batchStartTime = Date.now();
     let nonce: number | null = null;
     
     try {
       const addresses: `0x${string}`[] = items.map((item) => item.payer_address as `0x${string}`);
       const txHashes: `0x${string}`[] = items.map((item) => item.tx_hash_bytes32 as `0x${string}`);
+      
+      console.log(`   ⏱️  [0ms] Starting batch for ${tokenAddress.slice(0, 10)}... (${items.length} items)`);
 
-      // 🔧 FIX: Check on-chain status before processing (防止重复发送)
-      // This prevents re-sending transactions that were already sent before a restart
-      const alreadyMintedChecks = await Promise.all(
-        txHashes.map(txHash => 
-          this.publicClient.readContract({
-            address: tokenAddress,
-            abi: tokenAbi,
-            functionName: "hasMinted",
-            args: [txHash],
-          })
-        )
+      // 🔧 OPTIMIZED: Only check on-chain for items that might be duplicates
+      // Items are considered risky if:
+      // 1. They were created more than 30 seconds ago (could have been sent before restart)
+      // 2. This is the first batch after startup (resetStuckItems was called)
+      const now = Date.now();
+      const thirtySecondsAgo = new Date(now - 30000);
+      
+      const riskyItems = items.filter((item: any) => 
+        item.created_at && new Date(item.created_at) < thirtySecondsAgo
       );
+      
+      let alreadyMintedItems: QueueItem[] = [];
+      
+      if (riskyItems.length > 0) {
+        console.log(`   🔍 Checking ${riskyItems.length}/${items.length} older items for duplicates...`);
+        const checkStartTime = Date.now();
+        
+        const riskyTxHashes = riskyItems.map((item: any) => item.tx_hash_bytes32 as `0x${string}`);
+        const alreadyMintedChecks = await Promise.all(
+          riskyTxHashes.map(txHash => 
+            this.publicClient.readContract({
+              address: tokenAddress,
+              abi: tokenAbi,
+              functionName: "hasMinted",
+              args: [txHash],
+            })
+          )
+        );
+        
+        console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] hasMinted checks done (took ${Date.now() - checkStartTime}ms)`);
+        
+        alreadyMintedItems = riskyItems.filter((_, index) => alreadyMintedChecks[index]);
+      }
 
       // Filter out items that are already minted on-chain
-      const itemsToProcess = items.filter((_, index) => !alreadyMintedChecks[index]);
-      const alreadyMintedItems = items.filter((_, index) => alreadyMintedChecks[index]);
+      const itemsToProcess = items.filter(item => !alreadyMintedItems.includes(item));
 
       // Mark already minted items as completed immediately
       if (alreadyMintedItems.length > 0) {
@@ -387,10 +411,15 @@ export class MintQueueProcessor {
         [itemsToProcess.map((item) => item.id)]
       );
       
+      console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] DB updated to 'processing'`);
+      
       // Get nonce for this transaction (using cached nonce for performance)
       nonce = await this.nonceManager.getNextNonce();
+      
+      console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] Got nonce: ${nonce}`);
 
       // Check remaining supply
+      const supplyCheckStart = Date.now();
       const [remainingSupply, mintAmount] = await Promise.all([
         this.publicClient.readContract({
           address: tokenAddress,
@@ -403,6 +432,8 @@ export class MintQueueProcessor {
           functionName: "mintAmount",
         }),
       ]);
+      
+      console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] Supply checked (took ${Date.now() - supplyCheckStart}ms)`);
 
       const totalRequired = mintAmount * BigInt(itemsToProcess.length);
       if (remainingSupply < totalRequired) {
@@ -410,6 +441,7 @@ export class MintQueueProcessor {
       }
 
       // Use EIP-1559 for Base (much cheaper!)
+      const gasEstimateStart = Date.now();
       const block = await this.publicClient.getBlock();
       const baseFeePerGas = block.baseFeePerGas || 100000000n; // 0.1 gwei fallback
       
@@ -453,6 +485,7 @@ export class MintQueueProcessor {
       }
 
       console.log(`   ✅ Tx sent: ${hash}`);
+      console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] Transaction sent (gas estimate took ${Date.now() - gasEstimateStart}ms)`);
 
       // Record batch mint
       await this.pool.query(
@@ -462,11 +495,15 @@ export class MintQueueProcessor {
       );
 
       // Wait for confirmation
+      const waitStart = Date.now();
+      console.log(`   ⏳ Waiting for confirmation...`);
       const receipt = await this.publicClient.waitForTransactionReceipt({
         hash,
         confirmations: 1,
         timeout: 120_000,
       });
+      
+      console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] Confirmed! (wait took ${Date.now() - waitStart}ms)`);
 
       // 计算实际成本
       const actualGasUsed = receipt.gasUsed;
@@ -490,6 +527,7 @@ export class MintQueueProcessor {
       );
 
       // Mark items as completed and move to history
+      const dbUpdateStart = Date.now();
       const client = await this.pool.connect();
       
       try {
@@ -515,6 +553,9 @@ export class MintQueueProcessor {
         }
 
         await client.query("COMMIT");
+        
+        console.log(`   ⏱️  [${Date.now() - batchStartTime}ms] DB updated (took ${Date.now() - dbUpdateStart}ms)`);
+        console.log(`   🎯 Total batch time: ${Date.now() - batchStartTime}ms\n`);
         
         // Confirm nonce (transaction succeeded)
         if (nonce !== null) {
