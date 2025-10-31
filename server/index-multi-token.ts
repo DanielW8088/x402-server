@@ -1182,9 +1182,9 @@ app.post("/api/mint/:address", async (req, res) => {
       );
       
       // x402-fetch expects this exact format:
-      // { x402Version: "1", accepts: [PaymentRequirements] }
+      // { x402Version: 1, accepts: [PaymentRequirements] }
       const x402Response = {
-        x402Version: "1",
+        x402Version: 1,
         accepts: [paymentRequirements], // Array of payment options
       };
       
