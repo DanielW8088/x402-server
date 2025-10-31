@@ -405,22 +405,21 @@ function generatePaymentRequirements(
     maxAmountRequired: totalPriceWei.toString(),
     maxTimeoutSeconds: 300,
     asset: usdcAddress, // Token being paid (USDC)
-    // Input schema for x402scan discovery
-    inputSchema: {
-      type: "object",
-      properties: {
-        quantity: {
-          type: "number",
-          description: "Number of tokens to mint (default: 1)",
-          default: 1,
-          minimum: 1
-        }
-      }
-    },
-    // Output schema for x402scan discovery
+    // Schema for x402scan discovery (matches X402Response Accepts format)
     outputSchema: {
-      type: "object",
-      properties: {
+      input: {
+        type: "http" as const,
+        method: "POST" as const,
+        bodyType: "json" as const,
+        bodyFields: {
+          quantity: {
+            type: "number",
+            description: "Number of tokens to mint",
+            required: false
+          }
+        }
+      },
+      output: {
         success: {
           type: "boolean",
           description: "Whether the mint was successful"
