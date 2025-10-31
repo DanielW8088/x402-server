@@ -64,7 +64,7 @@ const excessRecipient = process.env.EXCESS_RECIPIENT_ADDRESS as `0x${string}`; /
 const network = (process.env.NETWORK || "base-sepolia") as "base-sepolia" | "base";
 
 // x402 Configuration
-const x402FacilitatorUrl = process.env.X402_FACILITATOR_URL || "https://x402.coinbase.com";
+const x402FacilitatorUrl = process.env.X402_FACILITATOR_URL || "https://x402.org/facilitator";
 const x402Enabled = process.env.X402_ENABLED !== 'false'; // Default enabled
 
 // Database configuration
@@ -524,83 +524,54 @@ async function settleX402Payment(
     // Decode X-PAYMENT header to get PaymentPayload
     const paymentPayload = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf-8'));
     
-    // Extract authorization from x402 payload
-    const authorization = paymentPayload.payload?.authorization;
-    if (!authorization) {
-      console.error('❌ Missing authorization in x402 payload');
-      return { success: false, error: "Missing authorization in x402 payment payload" };
-    }
-
-    // x402 signature is in the payload root, not in authorization
-    // Reconstruct authorization with signature from paymentPayload
-    const fullAuthorization = {
-      ...authorization,
-      signature: paymentPayload.payload?.signature || paymentPayload.signature,
-    };
-
-    if (!fullAuthorization.signature) {
-      console.error('❌ Missing signature in x402 payload. Payload structure:', {
-        hasPayloadSignature: !!paymentPayload.payload?.signature,
-        hasRootSignature: !!paymentPayload.signature,
-        payloadKeys: Object.keys(paymentPayload),
-        innerPayloadKeys: paymentPayload.payload ? Object.keys(paymentPayload.payload) : []
-      });
-      return { success: false, error: "Missing signature in x402 payment payload" };
-    }
-
-    // Get USDC address for this network
-    const usdcAddress = network === 'base-sepolia' 
-      ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
-      : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
-
-    // Queue the payment for serial processing (prevents nonce conflicts)
-    const paymentId = await paymentQueueProcessor.addToQueue(
-      'mint',
-      fullAuthorization,
-      fullAuthorization.from,
-      expectedAmount.toString(),
-      usdcAddress,
+    console.log('🔄 Settling x402 payment via facilitator:', x402FacilitatorUrl);
+    
+    // Calculate price (must match 402 response)
+    const pricePerMint = Number(expectedAmount) / (1e6 * quantity);
+    const totalPrice = pricePerMint * quantity;
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    
+    // Generate payment requirements (MUST match what was sent in 402 response!)
+    const paymentRequirements = generatePaymentRequirements(
       tokenAddress,
-      { quantity, x402: true } // Mark as x402 payment
+      quantity,
+      totalPrice,
+      expectedAmount,
+      baseUrl
     );
 
-    // Poll for payment completion (with timeout)
-    const maxWaitTime = 30000; // 30 seconds
-    const pollInterval = 500; // Check every 500ms
-    const startTime = Date.now();
+    // ✅ Use x402 SDK to settle payment through facilitator
+    // This is the standard x402 flow - facilitator handles the settlement
+    const settleResult = await settle(
+      combinedClient,       // Combined client with both public and wallet capabilities
+      paymentPayload,       // Payment payload from X-PAYMENT header
+      paymentRequirements  // Must match 402 response
+      // Config with facilitatorUrl is passed via environment/default
+    );
 
-    while (Date.now() - startTime < maxWaitTime) {
-      const status = await paymentQueueProcessor.getPaymentStatus(paymentId);
-      
-      if (!status) {
-        return { success: false, error: "Payment status not found" };
-      }
+    console.log('✅ Facilitator settle result:', {
+      success: settleResult.success,
+      errorReason: settleResult.errorReason,
+      transaction: settleResult.transaction,
+      network: settleResult.network
+    });
 
-      if (status.status === 'completed') {
-        return {
-          success: true,
-          txHash: status.tx_hash,
-        };
-      }
-
-      if (status.status === 'failed') {
-        return {
-          success: false,
-          error: status.error || "Payment processing failed",
-        };
-      }
-
-      // Still processing, wait and check again
-      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    if (settleResult.success) {
+      // Payment settled successfully via facilitator
+      return {
+        success: true,
+        txHash: settleResult.transaction,  // transaction hash from settle result
+      };
+    } else {
+      console.error('❌ Facilitator settlement failed:', settleResult.errorReason);
+      return {
+        success: false,
+        error: settleResult.errorReason || "Payment settlement failed via facilitator",
+      };
     }
 
-    // Timeout
-    return { 
-      success: false, 
-      error: "Payment processing timeout - check payment status later" 
-    };
-
   } catch (error: any) {
+    console.error('❌ Settlement error:', error);
     return { success: false, error: error.message };
   }
 }
