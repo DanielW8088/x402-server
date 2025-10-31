@@ -533,24 +533,40 @@ export class MintQueueProcessor {
       try {
         await client.query("BEGIN");
 
-        for (const item of itemsToProcess) {
-          // Update queue status
-          await client.query(
-            `UPDATE mint_queue 
-             SET status = 'completed', processed_at = NOW(), mint_tx_hash = $1 
-             WHERE id = $2`,
-            [hash, item.id]
-          );
+        // 🚀 OPTIMIZED: Bulk operations instead of loop
+        // Extract all IDs for bulk update
+        const itemIds = itemsToProcess.map(item => item.id);
+        
+        // 1. Bulk update queue status (1 query instead of N queries)
+        await client.query(
+          `UPDATE mint_queue 
+           SET status = 'completed', 
+               processed_at = NOW(), 
+               mint_tx_hash = $1,
+               updated_at = NOW()
+           WHERE id = ANY($2)`,
+          [hash, itemIds]
+        );
 
-          // Move to history
-          await client.query(
-            `INSERT INTO mint_history 
-             (payer_address, payment_tx_hash, tx_hash_bytes32, token_address, mint_tx_hash, amount, block_number, payment_type, completed_at)
-             SELECT payer_address, payment_tx_hash, tx_hash_bytes32, token_address, $1, $2, $3, payment_type, NOW()
-             FROM mint_queue WHERE id = $4`,
-            [hash, mintAmount.toString(), receipt.blockNumber.toString(), item.id]
-          );
-        }
+        // 2. Bulk insert into history (1 query instead of N queries)
+        await client.query(
+          `INSERT INTO mint_history 
+           (payer_address, payment_tx_hash, tx_hash_bytes32, token_address, mint_tx_hash, amount, block_number, payment_type, completed_at)
+           SELECT 
+             payer_address, 
+             payment_tx_hash, 
+             tx_hash_bytes32, 
+             token_address, 
+             $1 as mint_tx_hash,
+             $2 as amount,
+             $3 as block_number,
+             payment_type,
+             NOW() as completed_at
+           FROM mint_queue 
+           WHERE id = ANY($4)
+           ON CONFLICT (tx_hash_bytes32) DO NOTHING`,
+          [hash, mintAmount.toString(), receipt.blockNumber.toString(), itemIds]
+        );
 
         await client.query("COMMIT");
         
