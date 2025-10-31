@@ -477,10 +477,21 @@ async function verifyX402Payment(
       baseUrl
     );
     
+    console.log('🔍 Verifying x402 payment via facilitator');
+    console.log('📋 Payment requirements:', JSON.stringify({
+      scheme: paymentRequirements.scheme,
+      network: paymentRequirements.network,
+      resource: paymentRequirements.resource,
+      payTo: paymentRequirements.payTo,
+      asset: paymentRequirements.asset,
+      maxAmountRequired: paymentRequirements.maxAmountRequired
+    }, null, 2));
+    
     const verifyResult = await verify(
       publicClient as any,
       paymentPayload,
       paymentRequirements
+      // Note: x402 SDK uses default facilitator (x402.org) or verifies locally
     );
     
     if (verifyResult.isValid) {
@@ -585,11 +596,21 @@ async function settleX402Payment(
 
     // ✅ Use x402 SDK to settle payment through facilitator
     // This is the standard x402 flow - facilitator handles the settlement
+    console.log('🔄 Settling x402 payment');
+    console.log('📋 Settle payment requirements:', JSON.stringify({
+      scheme: paymentRequirements.scheme,
+      network: paymentRequirements.network,
+      resource: paymentRequirements.resource,
+      payTo: paymentRequirements.payTo,
+      asset: paymentRequirements.asset,
+      maxAmountRequired: paymentRequirements.maxAmountRequired
+    }, null, 2));
+    
     const settleResult = await settle(
       combinedClient,       // Combined client with both public and wallet capabilities
       paymentPayload,       // Payment payload from X-PAYMENT header
-      paymentRequirements  // Must match 402 response
-      // Config with facilitatorUrl is passed via environment/default
+      paymentRequirements   // Must match 402 response
+      // Note: x402 SDK uses default facilitator or settles locally
     );
 
     console.log('✅ Facilitator settle result:', {
