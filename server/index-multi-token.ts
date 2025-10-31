@@ -227,6 +227,10 @@ const usdcAbi = parseAbi([
 
 const app = express();
 
+// Trust proxy (nginx/cloudflare) to get correct protocol from X-Forwarded-Proto header
+// This fixes the http vs https issue when behind a reverse proxy
+app.set('trust proxy', true);
+
 // Enable CORS with x402 headers - Allow all headers for x402-fetch compatibility
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -395,11 +399,14 @@ function generatePaymentRequirements(
     ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
     : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
   
+  // Ensure HTTPS for production (fixes x402scan compatibility)
+  const resourceUrl = baseUrl.replace(/^http:/, 'https:');
+  
   return {
     scheme: "exact" as const,
     description: `Mint ${quantity}x AI agent tokens - Gasless minting on 0x402 protocol`,
     network: network as "base-sepolia" | "base",
-    resource: `${baseUrl}/api/mint/${tokenAddress}`,
+    resource: `${resourceUrl}/api/mint/${tokenAddress}`,
     mimeType: "application/json",
     payTo: tokenAddress as `0x${string}`, // Recipient of payment (token contract)
     maxAmountRequired: totalPriceWei.toString(),
