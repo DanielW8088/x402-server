@@ -1408,14 +1408,14 @@ app.post("/api/mint/:address", async (req, res) => {
             break; // Continue to mint processing
           }
 
-          if (status.status === 'failed') {
+          if (status.status === 'failed' || status.status === 'confirmation_failed') {
             return res.status(400).json({
               error: "Payment processing failed",
               message: status.error || "Payment transaction failed",
             });
           }
 
-          // Still processing, wait and check again
+          // Still processing ('pending', 'processing', 'sent'), wait and check again
           await new Promise(resolve => setTimeout(resolve, pollInterval));
         }
 
