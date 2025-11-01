@@ -414,7 +414,10 @@ class StandaloneLPDeployer {
            created_at ASC`
       );
 
-      if (result.rows.length === 0) return;
+      if (result.rows.length === 0) {
+        console.log(`\n✓ No tokens pending LP deployment (checked at ${new Date().toLocaleTimeString()})`);
+        return; // isProcessing will be reset in finally block
+      }
 
       console.log(`\n🔍 Found ${result.rows.length} token(s) pending LP deployment...`);
 
