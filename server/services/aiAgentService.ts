@@ -3,14 +3,14 @@
  */
 
 import { Pool } from 'pg';
-import { parseUnits, formatUnits, parseAbi } from 'viem';
+import { parseUnits, formatUnits, parseAbi, createWalletClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import crypto from 'crypto';
 import { encryptPrivateKey, decryptPrivateKey } from '../lib/encryption.js';
 import { getMessages, detectLanguage, type Language } from '../lib/i18n.js';
 import { getOpenAIService } from '../lib/openai.js';
-import { publicClient, combinedClient } from '../config/blockchain.js';
-import { network } from '../config/env.js';
+import { publicClient, combinedClient, chain, rpcTransport } from '../config/blockchain.js';
+import { network, relayerPrivateKey } from '../config/env.js';
 
 export interface AgentWallet {
   id: string;
@@ -54,11 +54,22 @@ interface ConversationContext {
 
 // USDC ABI for EIP-3009
 const usdcAbi = parseAbi([
-  'function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
+  'function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
   'function balanceOf(address account) view returns (uint256)',
   'function nonces(address owner) view returns (uint256)',
   'function authorizationState(address authorizer, bytes32 nonce) view returns (bool)',
 ]);
+
+// Create relayer wallet client for EIP-3009 transfers
+// Uses the same RPC balancer as other services for consistency and reliability
+const relayerAccount = privateKeyToAccount(relayerPrivateKey);
+const relayerClient = createWalletClient({
+  account: relayerAccount,
+  chain,
+  transport: rpcTransport,
+});
+
+console.log(`🔐 Relayer wallet initialized: ${relayerAccount.address}`);
 
 export class AIAgentService {
   private pool: Pool;
@@ -229,6 +240,7 @@ export class AIAgentService {
     const msg = getMessages(language);
 
     let response: string;
+    let metadata: any = undefined;
 
     // State machine for conversation flow (enhanced with OpenAI intent)
     switch (context.state) {
@@ -281,6 +293,16 @@ export class AIAgentService {
           
           context = { state: 'idle', language }; // Reset context but keep language
           response = await this.formatTaskCreatedMessage(task, language);
+          
+          // Add metadata with task info for frontend to handle payment
+          metadata = {
+            type: 'task_created',
+            taskId: task.id,
+            tokenAddress: task.tokenAddress,
+            quantity: task.quantity,
+            totalCost: task.totalCost.toString(),
+            agentWalletId: task.agentWalletId,
+          };
         } else {
           response = msg.invalidQuantity;
           context = { ...context, language };
@@ -295,8 +317,8 @@ export class AIAgentService {
     // Update context
     this.conversationContexts.set(normalizedAddress, context);
 
-    // Save assistant response
-    await this.saveChatMessage(normalizedAddress, 'assistant', response);
+    // Save assistant response with metadata
+    await this.saveChatMessage(normalizedAddress, 'assistant', response, metadata);
 
     return response;
   }
@@ -364,13 +386,13 @@ export class AIAgentService {
   /**
    * Get user's tasks
    */
-  async getUserTasks(userAddress: string, limit: number = 10): Promise<MintTask[]> {
+  async getUserTasks(userAddress: string, limit: number = 10, offset: number = 0): Promise<MintTask[]> {
     const result = await this.pool.query(
       `SELECT * FROM ai_agent_tasks 
        WHERE user_address = $1 
        ORDER BY created_at DESC 
-       LIMIT $2`,
-      [userAddress.toLowerCase(), limit]
+       LIMIT $2 OFFSET $3`,
+      [userAddress.toLowerCase(), limit, offset]
     );
 
     return result.rows.map(row => ({
@@ -389,6 +411,17 @@ export class AIAgentService {
       createdAt: row.created_at,
       completedAt: row.completed_at,
     }));
+  }
+
+  /**
+   * Get user's tasks count
+   */
+  async getUserTasksCount(userAddress: string): Promise<number> {
+    const result = await this.pool.query(
+      'SELECT COUNT(*) FROM ai_agent_tasks WHERE user_address = $1',
+      [userAddress.toLowerCase()]
+    );
+    return parseInt(result.rows[0].count);
   }
 
   /**
@@ -579,18 +612,19 @@ export class AIAgentService {
       const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
       const v = parseInt(sig.slice(128, 130), 16);
 
-      // Execute receiveWithAuthorization
+      // Execute transferWithAuthorization
       console.log(`💰 Funding task ${taskId}...`);
       console.log(`   From: ${authorization.from}`);
       console.log(`   To: ${agentAddress}`);
       console.log(`   Amount: ${formatUnits(BigInt(authorization.value), 6)} USDC`);
+      console.log(`   Relayer: ${relayerAccount.address}`);
 
-      // We need a wallet to execute this transaction
-      // Use the server wallet to submit the authorization
-      const hash = await combinedClient.writeContract({
+      // Use transferWithAuthorization with dedicated relayer wallet
+      // This prevents nonce conflicts with agent wallet's mint operations
+      const hash = await relayerClient.writeContract({
         address: usdcAddress,
         abi: usdcAbi,
-        functionName: 'receiveWithAuthorization',
+        functionName: 'transferWithAuthorization',
         args: [
           authorization.from as `0x${string}`,
           authorization.to as `0x${string}`,

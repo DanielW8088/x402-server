@@ -24,6 +24,7 @@ const PRIVATE_KEY_FILE = process.env.PRIVATE_KEY_FILE || DEFAULT_KEY_FILE;
  *   "serverPrivateKey": "0x...", 
  *   "minterPrivateKey": "0x...", 
  *   "lpDeployerPrivateKey": "0x...",
+ *   "relayerPrivateKey": "0x...",
  *   "agentEncryptionKey": "1a2b3c..." 
  * }
  * File permissions should be 600 (owner read/write only)
@@ -33,6 +34,7 @@ function loadPrivateKeys(): {
   minterPrivateKey: `0x${string}`;
   lpDeployerPrivateKey: `0x${string}`;
   aiAgentPrivateKey: `0x${string}`;
+  relayerPrivateKey: `0x${string}`;
   agentEncryptionKey: string;
 } {
   try {
@@ -60,6 +62,13 @@ function loadPrivateKeys(): {
       throw new Error("AI Agent private key must start with 0x");
     }
     
+    // Relayer private key (for EIP-3009 transferWithAuthorization)
+    // Falls back to server key if not specified
+    const relayerPrivateKey = keys.relayerPrivateKey || keys.serverPrivateKey;
+    if (!relayerPrivateKey.startsWith("0x")) {
+      throw new Error("Relayer private key must start with 0x");
+    }
+    
     // Agent encryption key is optional (AI Agent feature)
     const agentEncryptionKey = keys.agentEncryptionKey || '';
     
@@ -68,6 +77,7 @@ function loadPrivateKeys(): {
       minterPrivateKey: keys.minterPrivateKey as `0x${string}`,
       lpDeployerPrivateKey: keys.lpDeployerPrivateKey as `0x${string}`,
       aiAgentPrivateKey: aiAgentPrivateKey as `0x${string}`,
+      relayerPrivateKey: relayerPrivateKey as `0x${string}`,
       agentEncryptionKey,
     };
   } catch (error) {
@@ -82,6 +92,7 @@ function loadPrivateKeys(): {
       console.error(`        "minterPrivateKey": "0x...",`);
       console.error(`        "lpDeployerPrivateKey": "0x...",`);
       console.error(`        "aiAgentPrivateKey": "0x...",`);
+      console.error(`        "relayerPrivateKey": "0x...",`);
       console.error(`        "agentEncryptionKey": "1a2b3c..."`);
       console.error(`      }`);
       console.error(`   4. Set ownership: sudo chown $(whoami) ${PRIVATE_KEY_FILE}`);
@@ -97,8 +108,8 @@ function loadPrivateKeys(): {
 }
 
 // Load private keys from secure file
-const { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey, aiAgentPrivateKey, agentEncryptionKey } = loadPrivateKeys();
-export { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey, aiAgentPrivateKey, agentEncryptionKey };
+const { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey, aiAgentPrivateKey, relayerPrivateKey, agentEncryptionKey } = loadPrivateKeys();
+export { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey, aiAgentPrivateKey, relayerPrivateKey, agentEncryptionKey };
 
 // Other environment variables
 export const excessRecipient = process.env.EXCESS_RECIPIENT_ADDRESS as `0x${string}`;

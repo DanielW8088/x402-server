@@ -390,7 +390,8 @@ class AIMintExecutor {
       console.log(`╚════════════════════════════════════════════════════════════╝`);
       console.log(`   Token: ${task.tokenAddress}`);
       console.log(`   Quantity: ${task.quantity} (${task.mintsCompleted} completed)`);
-      console.log(`   Agent Wallet: ${wallet.agentAddress}`);
+      console.log(`   User Wallet (recipient): ${task.userAddress}`);
+      console.log(`   Agent Wallet (payer): ${wallet.agentAddress}`);
       console.log(`   Transaction Sender: ${this.aiAgentAccount.address}`);
       console.log(`   Retry Count: ${task.retryCount}/${MAX_RETRY_COUNT}`);
 
@@ -591,6 +592,10 @@ class AIMintExecutor {
           };
 
           console.log(`   🔐 Authorization created for batch, calling API...`);
+          console.log(`   📤 Sending to API:`);
+          console.log(`      - Payer (from): ${authorization.from}`);
+          console.log(`      - Recipient (to): ${task.userAddress}`);
+          console.log(`      - Quantity: ${batchSize}`);
 
           // 2. Call mint API once with batch quantity (with timeout)
           const controller = new AbortController();
@@ -617,7 +622,7 @@ class AIMintExecutor {
               throw new Error(errorData.message || `API error: ${response.status}`);
             }
 
-            const result = await response.json();
+            const result: any = await response.json();
             console.log(`   ✅ Batch of ${batchSize} mints queued successfully`);
             console.log(`   📋 Queue IDs: ${result.queueIds ? result.queueIds.slice(0, 3).join(', ') + '...' : result.queueId || 'N/A'}`);
 

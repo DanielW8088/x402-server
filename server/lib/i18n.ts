@@ -76,9 +76,8 @@ const en: Messages = {
     `• Quantity: ${quantity} mints\n` +
     `• Price per mint: ${pricePerMint} USDC\n` +
     `• Total: ${totalCost} USDC\n\n` +
-    `💰 Please send ${totalCost} USDC to:\n` +
-    `${agentAddress}\n\n` +
-    `I'll start minting automatically once I receive the funds!\n\n` +
+    `💳 Click the "Authorize Payment" button below to sign and approve the payment.\n` +
+    `No gas fees required - just sign the authorization!\n\n` +
     `Task ID: ${taskId.slice(0, 8)}...`,
   
   confused:
@@ -140,9 +139,8 @@ const zh: Messages = {
     `• 数量: ${quantity} 个\n` +
     `• 单价: ${pricePerMint} USDC\n` +
     `• 总共: ${totalCost} USDC\n\n` +
-    `💰 把 ${totalCost} USDC 转到这个地址:\n` +
-    `${agentAddress}\n\n` +
-    `我收到钱后会自动开始铸造！\n\n` +
+    `💳 点击下方"授权支付"按钮签名确认即可\n` +
+    `无需支付 gas，只需签个名！\n\n` +
     `任务编号: ${taskId.slice(0, 8)}...`,
   
   confused:

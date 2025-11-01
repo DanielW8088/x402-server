@@ -128,16 +128,19 @@ paymentQueueProcessor = new PaymentQueueProcessor(
         };
       }
       
-      const { quantity } = item.metadata;
+      const { quantity, recipient: metadataRecipient } = item.metadata;
       const tokenAddress = item.token_address!;
       const payer = item.payer;
+      const recipient = metadataRecipient || payer; // Use recipient from metadata or default to payer
+      
+      log.info(`🎯 Payment callback mint: payer=${payer}, recipient=${recipient}`);
       
       try {
         const queueIds: string[] = [];
         const timestamp = Date.now();
         
         for (let i = 0; i < quantity; i++) {
-          const txHashBytes32 = generateMintTxHash(payer, timestamp + i, tokenAddress);
+          const txHashBytes32 = generateMintTxHash(recipient, timestamp + i, tokenAddress);
           
           const queueId = await queueProcessor.addToQueue(
             payer,
@@ -145,7 +148,8 @@ paymentQueueProcessor = new PaymentQueueProcessor(
             txHash,
             item.authorization,
             'traditional',
-            tokenAddress
+            tokenAddress,
+            recipient // Pass recipient to queue!
           );
           
           queueIds.push(queueId);

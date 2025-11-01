@@ -14,6 +14,7 @@ const tokenAbi = parseAbi([
 interface QueueItem {
   id: string;
   payer_address: string;
+  recipient?: string; // Address that will receive the minted tokens (may differ from payer)
   tx_hash_bytes32: string;
   payment_type: string;
   token_address?: string;
@@ -172,7 +173,8 @@ export class MintQueueProcessor {
     paymentTxHash?: string,
     authorizationData?: any,
     paymentType: string = "x402",
-    tokenAddress?: string
+    tokenAddress?: string,
+    recipient?: string // NEW: Address that will receive the minted tokens (defaults to payer)
   ): Promise<string> {
     const client = await this.pool.connect();
     
@@ -210,15 +212,19 @@ export class MintQueueProcessor {
       const queuePosition = positionResult.rows[0].position;
 
       // Insert into queue with ON CONFLICT to handle rare race conditions
+      // If recipient is not provided, default to payer
+      const mintRecipient = recipient || payerAddress;
+      
       const result = await client.query(
         `INSERT INTO mint_queue 
-        (payer_address, payment_tx_hash, authorization_data, tx_hash_bytes32, token_address, payment_type, queue_position) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7) 
+        (payer_address, recipient, payment_tx_hash, authorization_data, tx_hash_bytes32, token_address, payment_type, queue_position) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
         ON CONFLICT (tx_hash_bytes32) DO UPDATE 
           SET updated_at = NOW()
         RETURNING id`,
         [
           payerAddress,
+          mintRecipient,
           paymentTxHash,
           authorizationData ? JSON.stringify(authorizationData) : null,
           txHashBytes32,
@@ -257,7 +263,7 @@ export class MintQueueProcessor {
       // include all their pending mints to keep them together
       const result = await this.pool.query(
         `WITH batch_candidates AS (
-          SELECT id, payer_address, tx_hash_bytes32, payment_type, token_address, created_at,
+          SELECT id, payer_address, recipient, tx_hash_bytes32, payment_type, token_address, created_at,
                  ROW_NUMBER() OVER (ORDER BY created_at ASC) as rn
           FROM mint_queue 
           WHERE status = 'pending'
@@ -267,7 +273,7 @@ export class MintQueueProcessor {
           FROM batch_candidates
           WHERE rn <= $1
         )
-        SELECT bc.id, bc.payer_address, bc.tx_hash_bytes32, bc.payment_type, bc.token_address, bc.created_at
+        SELECT bc.id, bc.payer_address, bc.recipient, bc.tx_hash_bytes32, bc.payment_type, bc.token_address, bc.created_at
         FROM batch_candidates bc
         INNER JOIN selected_payers sp 
           ON bc.payer_address = sp.payer_address 
@@ -404,8 +410,15 @@ export class MintQueueProcessor {
       }
 
       // Continue with remaining items
-      const addressesToProcess = itemsToProcess.map((item) => item.payer_address as `0x${string}`);
+      // Use recipient address for minting (not payer)
+      const addressesToProcess = itemsToProcess.map((item) => (item.recipient || item.payer_address) as `0x${string}`);
       const txHashesToProcess = itemsToProcess.map((item) => item.tx_hash_bytes32 as `0x${string}`);
+      
+      // Log recipient info for debugging
+      console.log(`   🎯 Mint recipients:`);
+      itemsToProcess.forEach((item, i) => {
+        console.log(`      ${i + 1}. Payer: ${item.payer_address.slice(0, 10)}... → Recipient: ${(item.recipient || item.payer_address).slice(0, 10)}... ${item.recipient && item.payer_address !== item.recipient ? '✅ DIFFERENT' : '❌ SAME'}`);
+      });
 
       // Mark as processing
       await this.pool.query(

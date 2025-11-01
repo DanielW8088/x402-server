@@ -204,6 +204,11 @@ export function createMintRouter(
           });
         }
       
+      // Determine recipient: use provided recipient or default to payer
+      const recipient = req.body.recipient || payer;
+      log.debug(`💎 Minting to recipient: ${recipient} (payer: ${payer})`);
+      log.info(`🎯 RECIPIENT CHECK: payer=${payer}, recipient=${recipient}, match=${payer === recipient ? '❌ SAME' : '✅ DIFFERENT'}`);
+      
         // Add payment to queue
         try {
           const paymentQueueId = await paymentQueueProcessor.addToQueue(
@@ -213,7 +218,7 @@ export function createMintRouter(
             authorization.value,
             paymentTokenAddress,
             tokenAddress,
-            { quantity }
+            { quantity, recipient } // ADD recipient to metadata!
           );
           
           // Poll for payment completion
@@ -347,6 +352,7 @@ export function createMintRouter(
       // Determine recipient: use provided recipient or default to payer
       const recipient = req.body.recipient || payer;
       log.debug(`💎 Minting to recipient: ${recipient} (payer: ${payer})`);
+      log.info(`🎯 RECIPIENT CHECK: payer=${payer}, recipient=${recipient}, match=${payer === recipient ? '❌ SAME' : '✅ DIFFERENT'}`);
 
       // Add mints to queue
       const queueIds: string[] = [];
@@ -368,12 +374,13 @@ export function createMintRouter(
         }
 
         const queueId = await queueProcessor.addToQueue(
-          recipient, // Mint to recipient, not payer
+          payer, // Payer (who paid for the mint)
           txHashBytes32,
           paymentTxHash,
           useX402 ? { paymentHeader } : authorization,
           paymentMode,
-          tokenAddress
+          tokenAddress,
+          recipient // Recipient (who receives the tokens)
         );
         
         queueIds.push(queueId);

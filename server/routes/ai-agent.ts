@@ -26,9 +26,14 @@ export function createAIAgentRouter(aiAgentService: AIAgentService): Router {
 
       const response = await aiAgentService.processMessage(userAddress, message);
 
+      // Get the latest chat message to check for metadata
+      const history = await aiAgentService.getChatHistory(userAddress, 1);
+      const latestMessage = history[history.length - 1];
+
       return res.json({
         success: true,
         response,
+        metadata: latestMessage?.metadata || null,
       });
     } catch (error: any) {
       console.error("Error in AI agent chat:", error);
@@ -118,6 +123,7 @@ export function createAIAgentRouter(aiAgentService: AIAgentService): Router {
     try {
       const { address } = req.params;
       const limit = parseInt(req.query.limit as string) || 10;
+      const offset = parseInt(req.query.offset as string) || 0;
 
       if (!isAddress(address)) {
         return res.status(400).json({
@@ -125,7 +131,11 @@ export function createAIAgentRouter(aiAgentService: AIAgentService): Router {
         });
       }
 
-      const tasks = await aiAgentService.getUserTasks(address, limit);
+      // Get tasks with limit and offset
+      const tasks = await aiAgentService.getUserTasks(address, limit, offset);
+      
+      // Get total count (optional, for pagination)
+      const totalResult = await aiAgentService.getUserTasksCount(address);
 
       return res.json({
         success: true,
@@ -134,6 +144,7 @@ export function createAIAgentRouter(aiAgentService: AIAgentService): Router {
           pricePerMint: task.pricePerMint.toString(),
           totalCost: task.totalCost.toString(),
         })),
+        total: totalResult,
       });
     } catch (error: any) {
       console.error("Error fetching tasks:", error);
