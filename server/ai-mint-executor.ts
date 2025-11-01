@@ -248,6 +248,32 @@ class AIMintExecutor {
 
   async start() {
     log.startup(`\n🚀 Starting AI Mint Executor...`);
+    
+    // Check for stuck tasks on startup
+    const stuckTasks = await this.pool.query(
+      `SELECT id, status, user_address, quantity, mints_completed, error_message, retry_count, created_at
+       FROM ai_agent_tasks
+       WHERE status IN ('funded', 'processing', 'pending_payment')
+       ORDER BY created_at DESC
+       LIMIT 10`
+    );
+    
+    if (stuckTasks.rows.length > 0) {
+      log.startup(`\n📋 Found ${stuckTasks.rows.length} pending/processing task(s):`);
+      stuckTasks.rows.forEach((task, i) => {
+        const age = Math.floor((Date.now() - new Date(task.created_at).getTime()) / 60000);
+        log.startup(`   ${i + 1}. ${task.id.slice(0, 8)} - ${task.status} - ${task.quantity} qty (${task.mints_completed} done) - ${age}m old`);
+        if (task.error_message) {
+          log.startup(`      Error: ${task.error_message.substring(0, 80)}...`);
+        }
+        if (task.retry_count > 0) {
+          log.startup(`      Retries: ${task.retry_count}/${MAX_RETRY_COUNT}`);
+        }
+      });
+    } else {
+      log.startup(`\n✅ No pending tasks found`);
+    }
+    
     log.startup(`   Monitoring for funded tasks...\n`);
 
     // Initial check
@@ -324,8 +350,7 @@ class AIMintExecutor {
             // Check if task has exceeded payment timeout (10 minutes)
             const taskAge = Date.now() - new Date(row.created_at).getTime();
             if (taskAge > PAYMENT_TIMEOUT) {
-              log.warn(`   ⏰ Task exceeded payment timeout (${Math.floor(taskAge / 60000)} minutes)`);
-              log.warn(`   ❌ Cancelling task due to timeout...`);
+              log.warn(`   ⏰ Task exceeded payment timeout, cancelling...`);
               
               await this.pool.query(
                 `UPDATE ai_agent_tasks 
@@ -336,7 +361,6 @@ class AIMintExecutor {
                 [`Payment timeout: No sufficient balance received within ${PAYMENT_TIMEOUT / 60000} minutes`, task.id]
               );
               
-              log.info(`   ✅ Task cancelled successfully`);
               continue;
             }
             
@@ -347,10 +371,6 @@ class AIMintExecutor {
               functionName: 'balanceOf',
               args: [wallet.agentAddress as `0x${string}`],
             });
-
-            log.debug(`   Agent wallet balance: ${formatUnits(currentBalance, 6)} USDC`);
-            log.debug(`   Required: ${formatUnits(task.totalCost, 6)} USDC`);
-            log.debug(`   Task age: ${Math.floor(taskAge / 60000)}m ${Math.floor((taskAge % 60000) / 1000)}s / ${PAYMENT_TIMEOUT / 60000}m timeout`);
 
             // Update database balance
             await this.pool.query(
@@ -364,7 +384,7 @@ class AIMintExecutor {
 
             // If sufficient balance, auto-fund the task
             if (currentBalance >= task.totalCost) {
-              log.info(`   ✅ Sufficient balance! Auto-funding task...`);
+              log.info(`   ✅ Sufficient balance, auto-funding...`);
               
               await this.pool.query(
                 `UPDATE ai_agent_tasks 
@@ -374,9 +394,7 @@ class AIMintExecutor {
               );
 
               task.status = 'funded';
-              log.success(`   ✅ Task auto-funded successfully`);
             } else {
-              log.debug(`   ⏳ Insufficient balance, will check again...`);
               continue;
             }
           }
@@ -389,7 +407,19 @@ class AIMintExecutor {
           // Wait between tasks to avoid spam
           await sleep(1000);
         } catch (error: any) {
-          log.error(`   ❌ Error processing task:`, error.message);
+          log.error(`   ❌ Error processing task ${row.id?.slice(0, 8) || 'unknown'}:`, error.message);
+          
+          // Update task with error info for debugging
+          try {
+            await this.pool.query(
+              `UPDATE ai_agent_tasks 
+               SET error_message = $1, retry_count = COALESCE(retry_count, 0) + 1
+               WHERE id = $2`,
+              [`Check error: ${error.message.substring(0, 400)}`, row.id]
+            );
+          } catch (updateError: any) {
+            log.error(`   Failed to update error: ${updateError.message}`);
+          }
         }
       }
     } catch (error: any) {
@@ -402,7 +432,6 @@ class AIMintExecutor {
   private async processTask(task: MintTask, wallet: AgentWallet) {
     const key = task.id;
     if (this.processingTasks.has(key)) {
-      log.debug(`   ⏭️  Task ${task.id.slice(0, 8)}: Already processing, skipping...`);
       return;
     }
 
@@ -414,13 +443,9 @@ class AIMintExecutor {
       log.info(`╚════════════════════════════════════════════════════════════╝`);
       log.info(`   Token: ${task.tokenAddress}`);
       log.info(`   Quantity: ${task.quantity} (${task.mintsCompleted} completed)`);
-      log.info(`   User Wallet (recipient): ${task.userAddress}`);
-      log.info(`   Agent Wallet (payer): ${wallet.agentAddress}`);
-      log.info(`   Transaction Sender: ${this.aiAgentAccount.address}`);
-      log.debug(`   Retry Count: ${task.retryCount}/${MAX_RETRY_COUNT}`);
+      log.info(`   Recipient: ${task.userAddress}`);
 
       // Check and update agent wallet USDC balance from chain
-      log.debug(`   🔍 Checking agent wallet USDC balance...`);
       const currentUsdcBalance = await this.publicClient.readContract({
         address: this.usdcAddress,
         abi: usdcAbi,
@@ -428,7 +453,7 @@ class AIMintExecutor {
         args: [wallet.agentAddress as `0x${string}`],
       });
 
-      log.info(`   💰 Agent wallet USDC balance: ${formatUnits(currentUsdcBalance, 6)} USDC`);
+      log.info(`   💰 Agent balance: ${formatUnits(currentUsdcBalance, 6)} USDC`);
 
       // Update database with current balance
       await this.pool.query(
@@ -506,20 +531,12 @@ class AIMintExecutor {
         pricePerMint = task.pricePerMint;
       }
 
-      log.debug(`   Payment Token: ${paymentToken}`);
-      log.info(`   Price per Mint: ${formatUnits(pricePerMint, 6)} USDC`);
-      log.debug(`   Mint Amount: ${formatUnits(mintAmount, 6)} tokens`);
-
-      // Calculate remaining mints
-      const remaining = task.quantity - task.mintsCompleted;
-      log.debug(`   Remaining: ${remaining} mints`);
+      log.info(`   💵 Price: ${formatUnits(pricePerMint, 6)} USDC per mint`);
 
       // Check AI Agent Account ETH balance
       const aiAgentEthBalance = await this.publicClient.getBalance({
         address: this.aiAgentAccount.address,
       });
-      
-      log.debug(`   AI Agent Account ETH: ${formatUnits(aiAgentEthBalance, 18)} ETH`);
       
       if (aiAgentEthBalance < parseUnits('0.001', 18)) {
         throw new Error(`AI Agent Account ETH balance too low: ${formatUnits(aiAgentEthBalance, 18)} ETH. Need at least 0.001 ETH.`);
@@ -557,8 +574,6 @@ class AIMintExecutor {
         try {
           // Batch mint optimization: authorize total amount and call API once per batch
           const batchTotalCost = pricePerMint * BigInt(batchSize);
-          
-          log.debug(`   💰 Batch cost: ${formatUnits(batchTotalCost, 6)} USDC (${formatUnits(pricePerMint, 6)} × ${batchSize})`);
 
           // 1. Generate EIP-3009 authorization for the entire batch
           const nonce = `0x${crypto.randomBytes(32).toString('hex')}` as `0x${string}`;
@@ -615,12 +630,6 @@ class AIMintExecutor {
             signature,
           };
 
-          log.debug(`   🔐 Authorization created for batch, calling API...`);
-          log.info(`   📤 Sending to API:`);
-          log.info(`      - Payer (from): ${authorization.from}`);
-          log.info(`      - Recipient (to): ${task.userAddress}`);
-          log.info(`      - Quantity: ${batchSize}`);
-
           // 2. Call mint API once with batch quantity (with timeout)
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 second timeout for batch
@@ -648,7 +657,6 @@ class AIMintExecutor {
 
             const result: any = await response.json();
             log.success(`   ✅ Batch of ${batchSize} mints queued successfully`);
-            log.debug(`   📋 Queue IDs: ${result.queueIds ? result.queueIds.slice(0, 3).join(', ') + '...' : result.queueId || 'N/A'}`);
 
             completed += batchSize;
 
@@ -723,14 +731,40 @@ class AIMintExecutor {
     } catch (error: any) {
       log.error(`\n❌ Task processing failed: ${error.message}`);
       
-      await this.pool.query(
-        `UPDATE ai_agent_tasks 
-         SET status = 'failed', 
-             error_message = $1,
-             completed_at = NOW()
-         WHERE id = $2`,
-        [error.message.substring(0, 500), task.id]
+      // Only mark as failed if not already handled by batch error logic
+      // Check current status first
+      const statusCheck = await this.pool.query(
+        `SELECT status FROM ai_agent_tasks WHERE id = $1`,
+        [task.id]
       );
+      
+      // If still in processing (not already marked as failed by batch logic), update with error
+      if (statusCheck.rows.length > 0 && statusCheck.rows[0].status === 'processing') {
+        const newRetryCount = (task.retryCount || 0) + 1;
+        
+        if (newRetryCount >= MAX_RETRY_COUNT) {
+          log.error(`   🚫 Task exceeded retry limit (${MAX_RETRY_COUNT}). Marking as failed.`);
+          await this.pool.query(
+            `UPDATE ai_agent_tasks 
+             SET status = 'failed', 
+                 error_message = $1,
+                 retry_count = $2,
+                 completed_at = NOW()
+             WHERE id = $3`,
+            [`Exceeded retry limit after ${MAX_RETRY_COUNT} attempts. Last error: ${error.message.substring(0, 400)}`, newRetryCount, task.id]
+          );
+        } else {
+          // Keep in processing for retry
+          log.warn(`   ⚠️  Will retry (${newRetryCount}/${MAX_RETRY_COUNT})...`);
+          await this.pool.query(
+            `UPDATE ai_agent_tasks 
+             SET error_message = $1,
+                 retry_count = $2
+             WHERE id = $3`,
+            [`Retry ${newRetryCount}/${MAX_RETRY_COUNT}: ${error.message.substring(0, 400)}`, newRetryCount, task.id]
+          );
+        }
+      }
     } finally {
       this.processingTasks.delete(key);
     }
