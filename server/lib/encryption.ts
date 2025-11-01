@@ -1,9 +1,10 @@
 /**
  * Encryption utilities for secure storage of private keys
- * Uses AES-256-GCM with key derived from environment variable
+ * Uses AES-256-GCM with key loaded from secure file
  */
 
 import crypto from 'crypto';
+import { agentEncryptionKey } from '../config/env.js';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16; // 128 bits
@@ -11,14 +12,14 @@ const AUTH_TAG_LENGTH = 16;
 const SALT_LENGTH = 32;
 
 /**
- * Get encryption key from environment variable
+ * Get encryption key from secure file (loaded by config/env.ts)
  * Key should be 32 bytes (256 bits) hex string
  */
 function getEncryptionKey(): Buffer {
-  const keyHex = process.env.AGENT_ENCRYPTION_KEY;
+  const keyHex = agentEncryptionKey;
   
   if (!keyHex) {
-    throw new Error('AGENT_ENCRYPTION_KEY environment variable not set');
+    throw new Error('agentEncryptionKey not loaded from private key file');
   }
   
   // If key is less than 64 chars (32 bytes hex), derive it using PBKDF2

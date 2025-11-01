@@ -344,12 +344,16 @@ export function createMintRouter(
         });
       }
 
+      // Determine recipient: use provided recipient or default to payer
+      const recipient = req.body.recipient || payer;
+      log.debug(`💎 Minting to recipient: ${recipient} (payer: ${payer})`);
+
       // Add mints to queue
       const queueIds: string[] = [];
       const timestamp = Date.now();
       
       for (let i = 0; i < quantity; i++) {
-        const txHashBytes32 = generateMintTxHash(payer, timestamp + i, tokenAddress);
+        const txHashBytes32 = generateMintTxHash(recipient, timestamp + i, tokenAddress);
         
         // Check if already minted
         const alreadyMinted = await publicClient.readContract({
@@ -364,7 +368,7 @@ export function createMintRouter(
         }
 
         const queueId = await queueProcessor.addToQueue(
-          payer,
+          recipient, // Mint to recipient, not payer
           txHashBytes32,
           paymentTxHash,
           useX402 ? { paymentHeader } : authorization,

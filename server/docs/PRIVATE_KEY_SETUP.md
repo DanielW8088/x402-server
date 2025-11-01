@@ -52,13 +52,17 @@ Add the following JSON content:
 {
   "serverPrivateKey": "0xYOUR_SERVER_PRIVATE_KEY_HERE",
   "minterPrivateKey": "0xYOUR_MINTER_PRIVATE_KEY_HERE",
-  "lpDeployerPrivateKey": "0xYOUR_LP_DEPLOYER_PRIVATE_KEY_HERE"
+  "lpDeployerPrivateKey": "0xYOUR_LP_DEPLOYER_PRIVATE_KEY_HERE",
+  "agentEncryptionKey": "1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890"
 }
 ```
 
 **Important:**
-- Keys must start with `0x`
-- All three keys are required
+- Wallet private keys must start with `0x`
+- First three keys are required
+- `agentEncryptionKey` is optional (required only if using AI Agent feature)
+- `agentEncryptionKey` should be 64-character hex string (32 bytes)
+- Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
 - File must be valid JSON
 
 ### 3. Verify Permissions
@@ -167,7 +171,8 @@ If you're migrating from the old `.env` approach:
    echo '{
      "serverPrivateKey": "0x...",
      "minterPrivateKey": "0x...",
-     "lpDeployerPrivateKey": "0x..."
+     "lpDeployerPrivateKey": "0x...",
+     "agentEncryptionKey": "..."
    }' | sudo tee /etc/secret/private.key
    sudo chmod 600 /etc/secret/private.key
    ```
@@ -208,7 +213,7 @@ sudo chown $(whoami) /etc/secret/private.key
 ```
 ❌ Failed to load private keys: Missing required keys in private key file
 ```
-**Solution:** Ensure all three keys (`serverPrivateKey`, `minterPrivateKey`, `lpDeployerPrivateKey`) are present.
+**Solution:** Ensure all three required keys (`serverPrivateKey`, `minterPrivateKey`, `lpDeployerPrivateKey`) are present. The `agentEncryptionKey` is optional.
 
 ## Production Deployment
 
@@ -265,9 +270,16 @@ See `config/private.key.example` for template:
 {
   "serverPrivateKey": "0x0000000000000000000000000000000000000000000000000000000000000001",
   "minterPrivateKey": "0x0000000000000000000000000000000000000000000000000000000000000002",
-  "lpDeployerPrivateKey": "0x0000000000000000000000000000000000000000000000000000000000000003"
+  "lpDeployerPrivateKey": "0x0000000000000000000000000000000000000000000000000000000000000003",
+  "agentEncryptionKey": "1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890"
 }
 ```
 
 Replace with your actual keys.
+
+**Note on agentEncryptionKey:**
+- This key encrypts AI Agent wallet private keys stored in database
+- Only needed if you're using the AI Agent feature
+- Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+- Keep it secure - losing this key means losing access to all encrypted agent wallets
 

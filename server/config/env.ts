@@ -20,13 +20,20 @@ const PRIVATE_KEY_FILE = process.env.PRIVATE_KEY_FILE || DEFAULT_KEY_FILE;
 
 /**
  * Read private keys from secure file system location
- * File should contain JSON: { "serverPrivateKey": "0x...", "minterPrivateKey": "0x...", "lpDeployerPrivateKey": "0x..." }
+ * File should contain JSON: { 
+ *   "serverPrivateKey": "0x...", 
+ *   "minterPrivateKey": "0x...", 
+ *   "lpDeployerPrivateKey": "0x...",
+ *   "agentEncryptionKey": "1a2b3c..." 
+ * }
  * File permissions should be 600 (owner read/write only)
  */
 function loadPrivateKeys(): { 
   serverPrivateKey: `0x${string}`; 
   minterPrivateKey: `0x${string}`;
   lpDeployerPrivateKey: `0x${string}`;
+  aiAgentPrivateKey: `0x${string}`;
+  agentEncryptionKey: string;
 } {
   try {
     // Check file exists and is readable
@@ -47,10 +54,21 @@ function loadPrivateKeys(): {
       throw new Error("Private keys must start with 0x");
     }
     
+    // AI Agent private key (optional, for AI mint executor)
+    const aiAgentPrivateKey = keys.aiAgentPrivateKey || keys.serverPrivateKey;
+    if (!aiAgentPrivateKey.startsWith("0x")) {
+      throw new Error("AI Agent private key must start with 0x");
+    }
+    
+    // Agent encryption key is optional (AI Agent feature)
+    const agentEncryptionKey = keys.agentEncryptionKey || '';
+    
     return {
       serverPrivateKey: keys.serverPrivateKey as `0x${string}`,
       minterPrivateKey: keys.minterPrivateKey as `0x${string}`,
       lpDeployerPrivateKey: keys.lpDeployerPrivateKey as `0x${string}`,
+      aiAgentPrivateKey: aiAgentPrivateKey as `0x${string}`,
+      agentEncryptionKey,
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -58,7 +76,14 @@ function loadPrivateKeys(): {
       console.error("\n💡 To fix:");
       console.error(`   1. Create file: sudo mkdir -p /etc/secret && sudo touch ${PRIVATE_KEY_FILE}`);
       console.error(`   2. Set permissions: sudo chmod 600 ${PRIVATE_KEY_FILE}`);
-      console.error(`   3. Add keys as JSON: { "serverPrivateKey": "0x...", "minterPrivateKey": "0x...", "lpDeployerPrivateKey": "0x..." }`);
+      console.error(`   3. Add keys as JSON:`);
+      console.error(`      {`);
+      console.error(`        "serverPrivateKey": "0x...",`);
+      console.error(`        "minterPrivateKey": "0x...",`);
+      console.error(`        "lpDeployerPrivateKey": "0x...",`);
+      console.error(`        "aiAgentPrivateKey": "0x...",`);
+      console.error(`        "agentEncryptionKey": "1a2b3c..."`);
+      console.error(`      }`);
       console.error(`   4. Set ownership: sudo chown $(whoami) ${PRIVATE_KEY_FILE}`);
       console.error(`\n📖 Or set PRIVATE_KEY_FILE env var to use a different location\n`);
     } else if ((error as NodeJS.ErrnoException).code === "EACCES") {
@@ -72,8 +97,8 @@ function loadPrivateKeys(): {
 }
 
 // Load private keys from secure file
-const { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey } = loadPrivateKeys();
-export { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey };
+const { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey, aiAgentPrivateKey, agentEncryptionKey } = loadPrivateKeys();
+export { serverPrivateKey, minterPrivateKey, lpDeployerPrivateKey, aiAgentPrivateKey, agentEncryptionKey };
 
 // Other environment variables
 export const excessRecipient = process.env.EXCESS_RECIPIENT_ADDRESS as `0x${string}`;

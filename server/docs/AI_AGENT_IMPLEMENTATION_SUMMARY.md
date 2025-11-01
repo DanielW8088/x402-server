@@ -79,7 +79,7 @@ Executor: 检测余额 → 自动 mint → Tokens → User
 - `encryptPrivateKey()` - 加密私钥（AES-256-GCM）
 - `decryptPrivateKey()` - 解密私钥
 - `generateEncryptionKey()` - 生成密钥
-- 使用环境变量 `AGENT_ENCRYPTION_KEY`
+- 使用 `agentEncryptionKey` 从私钥文件加载（不再从 .env）
 
 ### 3. AI Agent 服务
 
@@ -241,19 +241,29 @@ CREATE TABLE ai_agent_mint_records (
 );
 ```
 
-## 环境变量
+## 私钥文件
 
+⚠️ **安全更新：** `agentEncryptionKey` 现在存储在私钥文件中，不再使用环境变量。
+
+```json
+{
+  "serverPrivateKey": "0x...",
+  "minterPrivateKey": "0x...",
+  "lpDeployerPrivateKey": "0x...",
+  "agentEncryptionKey": "1a2b3c4d5e6f..."
+}
+```
+
+**文件位置：**
+- macOS: `~/.config/token-mint/private.key`
+- Linux: `/etc/secret/private.key`
+- 或自定义: `PRIVATE_KEY_FILE` 环境变量
+
+**其他环境变量（.env）：**
 ```bash
-# 必需 - AI Agent 加密密钥
-AGENT_ENCRYPTION_KEY=1a2b3c4d5e6f...  # 64 位 hex
-
-# 可选 - 禁用 AI Agent
-AI_AGENT_ENABLED=true  # default: true
-
-# 其他必需变量（已有）
 DATABASE_URL=postgresql://...
-SERVER_PRIVATE_KEY=0x...
-MINTER_PRIVATE_KEY=0x...
+NETWORK=base-sepolia
+PORT=4021
 ```
 
 ## 快速开始
@@ -262,29 +272,43 @@ MINTER_PRIVATE_KEY=0x...
 
 ```bash
 cd server
-node scripts/generate-agent-key.js
-# 输出添加到 .env
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# 或使用脚本: node scripts/generate-agent-key.js
 ```
 
-### 2. 数据库迁移
+### 2. 添加到私钥文件
+
+编辑私钥文件（macOS: `~/.config/token-mint/private.key` 或 Linux: `/etc/secret/private.key`）：
+```json
+{
+  "serverPrivateKey": "0x...",
+  "minterPrivateKey": "0x...",
+  "lpDeployerPrivateKey": "0x...",
+  "agentEncryptionKey": "刚才生成的密钥"
+}
+```
+
+📖 详见 `docs/PRIVATE_KEY_SETUP.md`
+
+### 3. 数据库迁移
 
 ```bash
 psql $DATABASE_URL -f db/migrations/006_add_ai_agent_system.sql
 ```
 
-### 3. 启动服务
+### 4. 启动服务
 
 ```bash
 npm run dev  # 或 pm2 restart token-server
 ```
 
-### 4. 测试
+### 5. 测试
 
 ```bash
 ./test-ai-agent.sh http://localhost:4021 0xYourAddress
 ```
 
-### 5. 前端使用
+### 6. 前端使用
 
 1. 访问 http://localhost:3000
 2. 进入 "AI Agent" 页面
@@ -514,9 +538,10 @@ curl http://localhost:4021/health | jq .aiAgent
 
 ### 检查清单
 
-- [x] 设置 `AGENT_ENCRYPTION_KEY`
+- [x] 在私钥文件中设置 `agentEncryptionKey`
 - [x] 运行数据库 migration
-- [x] 备份加密密钥
+- [x] 备份私钥文件（包含加密密钥）
+- [x] 验证文件权限 600
 - [x] 测试完整流程
 - [x] 监控日志
 - [ ] 设置告警（可选）
@@ -538,10 +563,11 @@ pm2 logs token-server | grep "AI Agent"
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| Agent 不启动 | 缺少 `AGENT_ENCRYPTION_KEY` | 生成并添加到 .env |
-| 解密失败 | 密钥改变 | 检查密钥是否正确 |
+| Agent 不启动 | 缺少 `agentEncryptionKey` | 生成并添加到私钥文件 |
+| 解密失败 | 密钥改变 | 检查私钥文件中的密钥是否正确 |
 | 任务卡在 pending | 未转账或余额不足 | 检查链上余额 |
 | Mint 失败 | Token 合约问题 | 查看 error_message |
+| 私钥文件读取失败 | 权限或路径问题 | 检查文件权限（600）和路径 |
 
 ## 文档索引
 

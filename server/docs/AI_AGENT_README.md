@@ -51,18 +51,37 @@ AI Agent 系统通过 **chatbot 对话** 让用户创建自动 mint 任务。用
 
 ```bash
 cd server
-node scripts/generate-agent-key.js
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
-# 输出:
-# AGENT_ENCRYPTION_KEY=1a2b3c4d...
+# 输出示例:
+# 1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890
 ```
 
-### 2. 添加到 .env
+### 2. 添加到私钥文件
 
+⚠️ **注意：** 加密密钥现在存储在私钥文件中，与其他私钥一起。
+
+**macOS:**
 ```bash
-# server/.env
-AGENT_ENCRYPTION_KEY=1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890
+nano ~/.config/token-mint/private.key
 ```
+
+**Linux:**
+```bash
+sudo nano /etc/secret/private.key
+```
+
+添加 `agentEncryptionKey` 字段：
+```json
+{
+  "serverPrivateKey": "0x...",
+  "minterPrivateKey": "0x...",
+  "lpDeployerPrivateKey": "0x...",
+  "agentEncryptionKey": "1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890"
+}
+```
+
+📖 **详细说明：** 参见 `docs/PRIVATE_KEY_SETUP.md`
 
 ### 3. 运行数据库迁移
 
@@ -153,7 +172,7 @@ Agent: ✅ 任务创建成功！
 ## 安全特性
 
 ✅ **私钥加密存储** - AES-256-GCM  
-✅ **环境变量密钥** - 不硬编码  
+✅ **加密密钥安全存储** - 与私钥一起存储在安全文件中  
 ✅ **Tokens 发到用户钱包** - Agent 不持有 tokens  
 ✅ **完整审计日志** - 所有操作可追踪  
 ✅ **权限隔离** - Agent 只能支付，不能随意提现  
@@ -220,8 +239,8 @@ FROM ai_agent_wallets;
 
 ### 加密错误
 
-- 检查 `AGENT_ENCRYPTION_KEY` 是否设置
-- 不要修改已有的 encryption key
+- 检查私钥文件中的 `agentEncryptionKey` 是否设置
+- 不要修改已有的 encryption key（会导致无法解密旧的 agent 钱包）
 
 ### Mint 失败
 

@@ -30,44 +30,57 @@ Server
     ↓ Tokens → User Wallet
 ```
 
-## 环境变量设置
+## 加密密钥设置
 
 ### 1. 生成加密密钥
 
-首先需要生成一个加密密钥用于保护 agent 钱包私钥：
+AI Agent 需要一个加密密钥用于保护 agent 钱包私钥。这个密钥现在存储在私钥文件中（与其他私钥一起）。
 
 ```bash
 cd server
 
-# 方式 1: 使用 Node.js 生成
+# 生成加密密钥
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
-# 方式 2: 使用 OpenSSL
+# 或使用 OpenSSL
 openssl rand -hex 32
 
 # 输出示例:
 # 1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890
 ```
 
-### 2. 添加到 .env
+### 2. 添加到私钥文件
 
+⚠️ **重要：** 加密密钥不再存储在 `.env` 中，而是与其他私钥一起存储在安全文件中。
+
+**macOS:**
 ```bash
-# server/.env
+nano ~/.config/token-mint/private.key
+```
 
-# AI Agent 加密密钥（必需！）
-# 用于加密/解密 agent 钱包私钥
-AGENT_ENCRYPTION_KEY=1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890
+**Linux:**
+```bash
+sudo nano /etc/secret/private.key
+```
 
-# 其他必需环境变量
-DATABASE_URL=postgresql://...
-SERVER_PRIVATE_KEY=0x...
-MINTER_PRIVATE_KEY=0x...
+添加 `agentEncryptionKey` 字段：
+
+```json
+{
+  "serverPrivateKey": "0x...",
+  "minterPrivateKey": "0x...",
+  "lpDeployerPrivateKey": "0x...",
+  "agentEncryptionKey": "1a2b3c4d5e6f7890abcdef1234567890fedcba0987654321abcdef1234567890"
+}
 ```
 
 ⚠️ **重要安全提示：**
-- 保管好 `AGENT_ENCRYPTION_KEY`，丢失后无法解密已存储的私钥
+- 保管好 `agentEncryptionKey`，丢失后无法解密已存储的 agent 钱包私钥
+- 文件权限必须为 600（仅所有者可读写）
 - 不要泄露此密钥
 - 生产环境建议使用密钥管理服务（如 AWS KMS, Vault）
+
+📖 **更多详情：** 参见 `docs/PRIVATE_KEY_SETUP.md` 了解私钥文件的完整配置
 
 ## 数据库迁移
 
@@ -136,6 +149,17 @@ pm2 start ecosystem.ai-agent.cjs
 ```
 
 或者，task executor 可以集成到主服务器中（推荐）。
+
+## 环境变量
+
+除了私钥文件，确保 `.env` 中有以下配置：
+
+```bash
+# server/.env
+DATABASE_URL=postgresql://...
+NETWORK=base-sepolia
+PORT=4021
+```
 
 ## 前端配置
 
@@ -326,10 +350,10 @@ app.post("/api/ai-agent/debug/check-tasks", async (req, res) => {
 ### 问题：加密密钥错误
 
 ```
-Error: AGENT_ENCRYPTION_KEY environment variable not set
+Error: agentEncryptionKey not loaded from private key file
 ```
 
-**解决：** 在 .env 中添加 `AGENT_ENCRYPTION_KEY`
+**解决：** 在私钥文件中添加 `agentEncryptionKey` 字段
 
 ### 问题：无法解密私钥
 
@@ -338,10 +362,10 @@ Error: Failed to decrypt private key: Invalid encrypted data format
 ```
 
 **可能原因：**
-1. `AGENT_ENCRYPTION_KEY` 改变了
+1. `agentEncryptionKey` 改变了
 2. 数据库中的加密数据损坏
 
-**解决：** 检查环境变量是否正确
+**解决：** 检查私钥文件中的 `agentEncryptionKey` 是否正确
 
 ### 问题：任务一直 pending_payment
 
@@ -437,11 +461,16 @@ AI Agent 系统已完全实现并可用：
 ✅ 前端 Chat UI  
 
 开始使用：
-1. 设置 `AGENT_ENCRYPTION_KEY`
-2. 运行 migration
-3. 启动服务器
+1. 在私钥文件中添加 `agentEncryptionKey`（参见上面"加密密钥设置"）
+2. 运行 migration：`psql $DATABASE_URL -f db/migrations/006_add_ai_agent_system.sql`
+3. 启动服务器：`npm run dev` 或 `pm2 restart token-server`
 4. 访问前端 AI Agent 页面
 5. 连接钱包开始对话！
 
 有问题？查看日志或检查数据库状态。
+
+📖 **更多文档：**
+- `docs/PRIVATE_KEY_SETUP.md` - 私钥文件完整配置
+- `docs/AI_AGENT_IMPLEMENTATION_SUMMARY.md` - 系统实现总结
+- `docs/AI_AGENT_README.md` - 快速开始指南
 

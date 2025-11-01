@@ -20,3 +20,9 @@ package-lock.json
 Thumbs.db
 0x402.io/
 
+# Private keys - NEVER commit
+private.key
+/etc/secret/
+*.key
+!*.key.example
+

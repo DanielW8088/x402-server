@@ -3,10 +3,14 @@
  */
 
 import { Pool } from 'pg';
-import { parseUnits, formatUnits } from 'viem';
+import { parseUnits, formatUnits, parseAbi } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import crypto from 'crypto';
 import { encryptPrivateKey, decryptPrivateKey } from '../lib/encryption.js';
+import { getMessages, detectLanguage, type Language } from '../lib/i18n.js';
+import { getOpenAIService } from '../lib/openai.js';
+import { publicClient, combinedClient } from '../config/blockchain.js';
+import { network } from '../config/env.js';
 
 export interface AgentWallet {
   id: string;
@@ -45,11 +49,21 @@ interface ConversationContext {
   state: 'idle' | 'waiting_token' | 'waiting_quantity';
   tokenAddress?: string;
   quantity?: number;
+  language?: Language;
 }
+
+// USDC ABI for EIP-3009
+const usdcAbi = parseAbi([
+  'function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external',
+  'function balanceOf(address account) view returns (uint256)',
+  'function nonces(address owner) view returns (uint256)',
+  'function authorizationState(address authorizer, bytes32 nonce) view returns (bool)',
+]);
 
 export class AIAgentService {
   private pool: Pool;
   private conversationContexts: Map<string, ConversationContext> = new Map();
+  private openAI = getOpenAIService();
 
   constructor(pool: Pool) {
     this.pool = pool;
@@ -116,6 +130,49 @@ export class AIAgentService {
   }
 
   /**
+   * Refresh agent wallet USDC balance from chain
+   */
+  async refreshWalletBalance(agentWalletId: string): Promise<{ usdcBalance: bigint; lastBalanceCheck: Date }> {
+    // Get wallet address
+    const result = await this.pool.query(
+      'SELECT agent_address FROM ai_agent_wallets WHERE id = $1',
+      [agentWalletId]
+    );
+
+    if (result.rows.length === 0) {
+      throw new Error('Agent wallet not found');
+    }
+
+    const agentAddress = result.rows[0].agent_address;
+
+    // Get USDC address based on network
+    const usdcAddress = network === 'base-sepolia' 
+      ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+      : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+
+    // Read balance from chain
+    const balance = await publicClient.readContract({
+      address: usdcAddress,
+      abi: usdcAbi,
+      functionName: 'balanceOf',
+      args: [agentAddress as `0x${string}`],
+    });
+
+    // Update database
+    await this.pool.query(
+      `UPDATE ai_agent_wallets 
+       SET usdc_balance = $1, last_balance_check = NOW() 
+       WHERE id = $2`,
+      [balance.toString(), agentWalletId]
+    );
+
+    return {
+      usdcBalance: balance,
+      lastBalanceCheck: new Date(),
+    };
+  }
+
+  /**
    * Save chat message
    */
   async saveChatMessage(
@@ -153,7 +210,7 @@ export class AIAgentService {
   }
 
   /**
-   * Process user message and generate response (chatbot logic)
+   * Process user message and generate response (chatbot logic with OpenAI)
    */
   async processMessage(userAddress: string, userMessage: string): Promise<string> {
     const normalizedAddress = userAddress.toLowerCase();
@@ -164,49 +221,56 @@ export class AIAgentService {
     // Get or create conversation context
     let context = this.conversationContexts.get(normalizedAddress) || { state: 'idle' };
 
+    // Use OpenAI to analyze intent
+    const intentResult = await this.openAI.analyzeIntent(userMessage, context.state);
+    
+    // Use detected language
+    const language = context.language || intentResult.language;
+    const msg = getMessages(language);
+
     let response: string;
 
-    // State machine for conversation flow
+    // State machine for conversation flow (enhanced with OpenAI intent)
     switch (context.state) {
       case 'idle':
-        // Check if user wants to mint
-        if (this.detectMintIntent(userMessage)) {
-          context = { state: 'waiting_token' };
-          response = "好的！请告诉我你想 mint 的 token 合约地址 (例如: 0x...)";
-        } else if (this.detectBalanceQuery(userMessage)) {
+        // Check intent from OpenAI
+        if (intentResult.intent === 'mint') {
+          context = { state: 'waiting_token', language };
+          response = msg.askTokenAddress;
+        } else if (intentResult.intent === 'balance') {
           const wallet = await this.getOrCreateAgentWallet(normalizedAddress);
-          response = `你的 AI Agent 钱包地址是: ${wallet.agentAddress}\n\n当前余额: ${formatUnits(wallet.usdcBalance, 6)} USDC`;
-        } else if (this.detectTasksQuery(userMessage)) {
+          response = msg.walletInfo(wallet.agentAddress, formatUnits(wallet.usdcBalance, 6));
+          context = { ...context, language };
+        } else if (intentResult.intent === 'tasks') {
           const tasks = await this.getUserTasks(normalizedAddress, 5);
           if (tasks.length === 0) {
-            response = "你还没有创建任何 mint 任务。\n\n想要开始吗？告诉我 '我想 mint 个币'";
+            response = msg.noTasks;
           } else {
-            response = this.formatTasksList(tasks);
+            response = this.formatTasksList(tasks, language);
           }
+          context = { ...context, language };
         } else {
-          response = "你好！我是你的 AI Mint Agent 🤖\n\n" +
-            "我可以帮你：\n" +
-            "• 自动 mint tokens\n" +
-            "• 查看余额和任务\n" +
-            "• 管理你的 agent 钱包\n\n" +
-            "想要 mint 币吗？告诉我 '我想 mint 个币'";
+          // Default welcome or help
+          response = msg.welcome;
+          context = { ...context, language };
         }
         break;
 
       case 'waiting_token':
-        // Extract token address
-        const tokenAddress = this.extractTokenAddress(userMessage);
+        // Check if OpenAI extracted a token address
+        const tokenAddress = intentResult.tokenAddress || this.extractTokenAddress(userMessage);
         if (tokenAddress) {
-          context = { state: 'waiting_quantity', tokenAddress };
-          response = `好的！Token 地址: ${tokenAddress}\n\n你想 mint 多少次呢？(1-1000)`;
+          context = { state: 'waiting_quantity', tokenAddress, language };
+          response = msg.askQuantity(tokenAddress);
         } else {
-          response = "抱歉，我没有识别到有效的合约地址。\n\n请输入一个以 0x 开头的地址，例如: 0x1234...";
+          response = msg.invalidAddress;
+          context = { ...context, language };
         }
         break;
 
       case 'waiting_quantity':
-        // Extract quantity
-        const quantity = this.extractQuantity(userMessage);
+        // Check if OpenAI extracted a quantity
+        const quantity = intentResult.quantity || this.extractQuantity(userMessage);
         if (quantity && quantity > 0 && quantity <= 1000) {
           // Create task
           const task = await this.createMintTask(
@@ -215,16 +279,17 @@ export class AIAgentService {
             quantity
           );
           
-          context = { state: 'idle' }; // Reset context
-          response = await this.formatTaskCreatedMessage(task);
+          context = { state: 'idle', language }; // Reset context but keep language
+          response = await this.formatTaskCreatedMessage(task, language);
         } else {
-          response = "请输入一个有效的数量 (1-1000)，例如: 100";
+          response = msg.invalidQuantity;
+          context = { ...context, language };
         }
         break;
 
       default:
-        context = { state: 'idle' };
-        response = "对不起，我有点迷糊了。我们重新开始吧！\n\n想要 mint 币吗？";
+        context = { state: 'idle', language };
+        response = msg.confused;
     }
 
     // Update context
@@ -424,48 +489,158 @@ export class AIAgentService {
     return match ? parseInt(match[0]) : null;
   }
 
-  private async formatTaskCreatedMessage(task: MintTask): Promise<string> {
+  private async formatTaskCreatedMessage(task: MintTask, language: Language = 'en'): Promise<string> {
     const wallet = await this.pool.query(
       'SELECT agent_address FROM ai_agent_wallets WHERE id = $1',
       [task.agentWalletId]
     );
 
     const agentAddress = wallet.rows[0].agent_address;
+    const msg = getMessages(language);
 
-    return `✅ 任务创建成功！\n\n` +
-      `📋 任务详情:\n` +
-      `• Token: ${task.tokenAddress}\n` +
-      `• 数量: ${task.quantity} 次\n` +
-      `• 单价: ${formatUnits(task.pricePerMint, 6)} USDC\n` +
-      `• 总计: ${formatUnits(task.totalCost, 6)} USDC\n\n` +
-      `💰 请转账 ${formatUnits(task.totalCost, 6)} USDC 到:\n` +
-      `${agentAddress}\n\n` +
-      `收到转账后，我会自动开始 mint！\n\n` +
-      `任务ID: ${task.id.slice(0, 8)}...`;
+    return msg.taskCreated(
+      task.tokenAddress,
+      task.quantity,
+      formatUnits(task.pricePerMint, 6),
+      formatUnits(task.totalCost, 6),
+      agentAddress,
+      task.id
+    );
   }
 
-  private formatTasksList(tasks: MintTask[]): string {
-    let message = "📋 你的 Mint 任务:\n\n";
+  private formatTasksList(tasks: MintTask[], language: Language = 'en'): string {
+    const msg = getMessages(language);
+    const header = language === 'zh' ? "📋 你的 Mint 任务:\n\n" : "📋 Your Mint Tasks:\n\n";
+    let message = header;
 
     for (const task of tasks) {
-      const statusEmoji = {
-        pending_payment: '⏳',
-        funded: '💰',
-        processing: '🔄',
-        completed: '✅',
-        failed: '❌',
-        cancelled: '🚫',
-      }[task.status];
+      const statusText = msg.taskStatus[task.status];
 
-      message += `${statusEmoji} ${task.tokenAddress.slice(0, 6)}...${task.tokenAddress.slice(-4)}\n`;
-      message += `   ${task.mintsCompleted}/${task.quantity} 完成`;
-      if (task.status === 'pending_payment') {
-        message += ` - 等待付款`;
-      }
+      message += `${statusText} ${task.tokenAddress.slice(0, 6)}...${task.tokenAddress.slice(-4)}\n`;
+      message += `   ${task.mintsCompleted}/${task.quantity} `;
+      message += language === 'zh' ? '完成' : 'completed';
       message += `\n\n`;
     }
 
     return message;
+  }
+
+  /**
+   * Fund a task with EIP-3009 authorization
+   */
+  async fundTask(
+    taskId: string,
+    authorization: any,
+    signature: string
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
+    try {
+      // Get task
+      const task = await this.getTask(taskId);
+      if (!task) {
+        return { success: false, error: 'Task not found' };
+      }
+
+      if (task.status !== 'pending_payment') {
+        return { success: false, error: `Task status is ${task.status}, expected pending_payment` };
+      }
+
+      // Get agent wallet
+      const walletResult = await this.pool.query(
+        'SELECT agent_address FROM ai_agent_wallets WHERE id = $1',
+        [task.agentWalletId]
+      );
+
+      if (walletResult.rows.length === 0) {
+        return { success: false, error: 'Agent wallet not found' };
+      }
+
+      const agentAddress = walletResult.rows[0].agent_address;
+
+      // Validate authorization
+      if (authorization.to.toLowerCase() !== agentAddress.toLowerCase()) {
+        return { success: false, error: 'Authorization recipient does not match agent wallet' };
+      }
+
+      if (BigInt(authorization.value) < task.totalCost) {
+        return { 
+          success: false, 
+          error: `Insufficient authorization amount: ${authorization.value}, required: ${task.totalCost.toString()}` 
+        };
+      }
+
+      // Get USDC address based on network
+      const usdcAddress = network === 'base-sepolia' 
+        ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+        : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
+
+      // Parse signature
+      const sig = signature.startsWith('0x') ? signature.slice(2) : signature;
+      const r = `0x${sig.slice(0, 64)}` as `0x${string}`;
+      const s = `0x${sig.slice(64, 128)}` as `0x${string}`;
+      const v = parseInt(sig.slice(128, 130), 16);
+
+      // Execute receiveWithAuthorization
+      console.log(`💰 Funding task ${taskId}...`);
+      console.log(`   From: ${authorization.from}`);
+      console.log(`   To: ${agentAddress}`);
+      console.log(`   Amount: ${formatUnits(BigInt(authorization.value), 6)} USDC`);
+
+      // We need a wallet to execute this transaction
+      // Use the server wallet to submit the authorization
+      const hash = await combinedClient.writeContract({
+        address: usdcAddress,
+        abi: usdcAbi,
+        functionName: 'receiveWithAuthorization',
+        args: [
+          authorization.from as `0x${string}`,
+          authorization.to as `0x${string}`,
+          BigInt(authorization.value),
+          BigInt(authorization.validAfter),
+          BigInt(authorization.validBefore),
+          authorization.nonce as `0x${string}`,
+          v,
+          r,
+          s,
+        ],
+      });
+
+      console.log(`   📤 Tx: ${hash}`);
+
+      // Wait for confirmation
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        confirmations: 2,
+      });
+
+      console.log(`   ✅ Confirmed in block ${receipt.blockNumber}`);
+
+      // Update task status to funded
+      await this.updateTaskStatus(taskId, 'funded', {
+        fundingTxHash: hash,
+      });
+
+      // Update agent wallet balance
+      const balance = await publicClient.readContract({
+        address: usdcAddress,
+        abi: usdcAbi,
+        functionName: 'balanceOf',
+        args: [agentAddress as `0x${string}`],
+      });
+
+      await this.pool.query(
+        `UPDATE ai_agent_wallets 
+         SET usdc_balance = $1, last_balance_check = NOW() 
+         WHERE id = $2`,
+        [balance.toString(), task.agentWalletId]
+      );
+
+      console.log(`   💰 Agent wallet balance: ${formatUnits(balance, 6)} USDC`);
+
+      return { success: true, txHash: hash };
+    } catch (error: any) {
+      console.error('❌ Error funding task:', error);
+      return { success: false, error: error.message };
+    }
   }
 }
 

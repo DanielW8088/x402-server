@@ -54,12 +54,23 @@ export function createAIAgentRouter(aiAgentService: AIAgentService): Router {
 
       const wallet = await aiAgentService.getOrCreateAgentWallet(address);
 
+      // Optionally refresh balance from chain if requested
+      const refresh = req.query.refresh === 'true';
+      let usdcBalance = wallet.usdcBalance;
+      let lastBalanceCheck = wallet.lastBalanceCheck;
+
+      if (refresh) {
+        const refreshed = await aiAgentService.refreshWalletBalance(wallet.id);
+        usdcBalance = refreshed.usdcBalance;
+        lastBalanceCheck = refreshed.lastBalanceCheck;
+      }
+
       return res.json({
         success: true,
         wallet: {
           agentAddress: wallet.agentAddress,
-          usdcBalance: wallet.usdcBalance.toString(),
-          lastBalanceCheck: wallet.lastBalanceCheck,
+          usdcBalance: usdcBalance.toString(),
+          lastBalanceCheck: lastBalanceCheck,
         },
       });
     } catch (error: any) {
@@ -236,6 +247,58 @@ export function createAIAgentRouter(aiAgentService: AIAgentService): Router {
       console.error("Error retrying task:", error);
       return res.status(500).json({
         error: "Failed to retry task",
+        message: error.message,
+      });
+    }
+  });
+
+  /**
+   * POST /api/ai-agent/task/:taskId/fund - Fund a task with EIP-3009 authorization
+   */
+  router.post("/ai-agent/task/:taskId/fund", async (req, res) => {
+    try {
+      const { taskId } = req.params;
+      const { authorization, signature } = req.body;
+
+      if (!authorization || !signature) {
+        return res.status(400).json({
+          error: "Missing authorization or signature",
+        });
+      }
+
+      const task = await aiAgentService.getTask(taskId);
+      if (!task) {
+        return res.status(404).json({
+          error: "Task not found",
+        });
+      }
+
+      if (task.status !== 'pending_payment') {
+        return res.status(400).json({
+          error: "Task is not awaiting payment",
+          message: `Task status is ${task.status}`,
+        });
+      }
+
+      // Process the payment
+      const result = await aiAgentService.fundTask(taskId, authorization, signature);
+
+      if (result.success) {
+        return res.json({
+          success: true,
+          txHash: result.txHash,
+          message: "Task funded successfully",
+        });
+      } else {
+        return res.status(400).json({
+          error: "Payment failed",
+          message: result.error,
+        });
+      }
+    } catch (error: any) {
+      console.error("Error funding task:", error);
+      return res.status(500).json({
+        error: "Failed to fund task",
         message: error.message,
       });
     }

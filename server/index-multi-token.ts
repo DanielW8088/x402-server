@@ -13,7 +13,8 @@ import {
   PORT, 
   network, 
   DEPLOY_FEE_USDC,
-  x402Enabled 
+  x402Enabled,
+  agentEncryptionKey
 } from "./config/env.js";
 import { pool, initRedis } from "./config/database.js";
 import { 
@@ -194,22 +195,14 @@ async function start() {
   userService = new UserService(pool, redis);
   aiAgentService = new AIAgentService(pool);
   
-  // Initialize AI agent task executor
-  const aiAgentEnabled = process.env.AI_AGENT_ENABLED !== 'false';
-  if (aiAgentEnabled && process.env.AGENT_ENCRYPTION_KEY) {
-    const serverUrl = `http://localhost:${PORT}`;
-    
-    aiAgentExecutor = new AIAgentTaskExecutor(
-      pool,
-      network,
-      rpcTransport,
-      serverUrl
-    );
-    
-    await aiAgentExecutor.start();
-  } else if (aiAgentEnabled && !process.env.AGENT_ENCRYPTION_KEY) {
-    log.warn('AI Agent enabled but AGENT_ENCRYPTION_KEY not set. Agent will not start.');
-    log.warn('   Generate key with: node scripts/generate-agent-key.js');
+  // AI Agent Task Executor is now a standalone service (ai-mint-executor.ts)
+  // Run it separately with: pm2 start ecosystem.ai-mint.cjs
+  // DO NOT enable it here to avoid conflicts
+  const aiAgentEnabled = false; // Always disabled in main server
+  if (aiAgentEnabled && agentEncryptionKey) {
+    log.warn('⚠️  AI Agent Task Executor should run as standalone service!');
+    log.warn('   Start with: pm2 start ecosystem.ai-mint.cjs');
+    log.warn('   Do not enable AI_AGENT_ENABLED in main server');
   }
 
   // Initialize queue processor
@@ -285,7 +278,7 @@ process.on('SIGTERM', async () => {
   log.info('\n🛑 Shutting down gracefully...');
   queueProcessor.stop();
   paymentQueueProcessor.stop();
-  if (aiAgentExecutor) aiAgentExecutor.stop();
+  // if (aiAgentExecutor) aiAgentExecutor.stop(); // Now runs as standalone service
   if (redis) await redis.quit();
   await pool.end();
   log.info('✅ Shutdown complete');
@@ -296,7 +289,7 @@ process.on('SIGINT', async () => {
   log.info('\n🛑 Shutting down gracefully...');
   queueProcessor.stop();
   paymentQueueProcessor.stop();
-  if (aiAgentExecutor) aiAgentExecutor.stop();
+  // if (aiAgentExecutor) aiAgentExecutor.stop(); // Now runs as standalone service
   if (redis) await redis.quit();
   await pool.end();
   log.info('✅ Shutdown complete');
