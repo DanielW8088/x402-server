@@ -254,6 +254,27 @@ app.use(express.json());
 // Will be initialized with userService in start() function
 let queueProcessor: MintQueueProcessor;
 
+// In-memory cache for token info (fallback when Redis not available)
+const tokenInfoCache = new Map<string, { data: any; expiry: number }>();
+const TOKEN_CACHE_TTL_MS = 60 * 1000; // 60 seconds (1 minute)
+
+// Clean up expired cache entries every 2 minutes
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  
+  for (const [key, entry] of tokenInfoCache.entries()) {
+    if (entry.expiry < now) {
+      tokenInfoCache.delete(key);
+      cleanedCount++;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned up ${cleanedCount} expired cache entries. Current size: ${tokenInfoCache.size}`);
+  }
+}, 120000); // Every 2 minutes
+
 // Initialize payment queue processor for serial payment processing
 // Use SERVER wallet for receiving USDC payments (prevents nonce conflicts)
 const paymentQueueProcessor = new PaymentQueueProcessor(
@@ -1047,7 +1068,7 @@ app.get("/api/tokens", async (req, res) => {
 });
 
 /**
- * GET /api/tokens/:address - Get specific token info (with Redis cache)
+ * GET /api/tokens/:address - Get specific token info (with cache - 1 minute TTL)
  */
 app.get("/api/tokens/:address", async (req, res) => {
   try {
@@ -1056,18 +1077,26 @@ app.get("/api/tokens/:address", async (req, res) => {
     
     // Cache key for individual token
     const cacheKey = `token:${network}:${address.toLowerCase()}`;
-    const cacheTTL = parseInt(process.env.TOKEN_CACHE_TTL || '10'); // 10 seconds default
+    const cacheTTL = parseInt(process.env.TOKEN_CACHE_TTL || '60'); // 60 seconds (1 minute) default
     
-    // Try cache first
+    // Try Redis cache first
     if (redis) {
       try {
         const cached = await redis.get(cacheKey);
         if (cached) {
+          console.log(`✅ Cache hit (Redis): ${address}`);
           return res.json(JSON.parse(cached));
         }
       } catch (cacheErr: any) {
-        // Redis read error
+        console.warn(`⚠️  Redis cache error: ${cacheErr.message}`);
       }
+    }
+    
+    // Try in-memory cache as fallback
+    const memCacheEntry = tokenInfoCache.get(cacheKey);
+    if (memCacheEntry && memCacheEntry.expiry > Date.now()) {
+      console.log(`✅ Cache hit (Memory): ${address}`);
+      return res.json(memCacheEntry.data);
     }
 
     // Fetch on-chain data
@@ -1152,14 +1181,22 @@ app.get("/api/tokens/:address", async (req, res) => {
       decimals, // Token decimals (6 for new X402Tokens, 18 for old ones)
     };
     
-    // Store in cache
+    // Store in Redis cache
     if (redis) {
       try {
         await redis.setex(cacheKey, cacheTTL, JSON.stringify(response));
+        console.log(`💾 Cached in Redis: ${address} (TTL: ${cacheTTL}s)`);
       } catch (cacheErr: any) {
-        // Redis write error
+        console.warn(`⚠️  Redis cache write error: ${cacheErr.message}`);
       }
     }
+    
+    // Store in memory cache as fallback
+    tokenInfoCache.set(cacheKey, {
+      data: response,
+      expiry: Date.now() + TOKEN_CACHE_TTL_MS
+    });
+    console.log(`💾 Cached in Memory: ${address} (TTL: 60s)`);
 
     return res.json(response);
   } catch (error: any) {
