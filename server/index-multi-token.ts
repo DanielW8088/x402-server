@@ -1330,12 +1330,20 @@ app.post("/api/mint/:address", async (req, res) => {
     // 🔒 SECURE X402 ASYNC MODE: Payment FIRST, then mints via callback
     // Extract authorization from x402 payment
     const paymentAuth = paymentPayload.payload?.authorization;
+    const paymentSignature = paymentPayload.payload?.signature;
+    
     if (!paymentAuth) {
       return res.status(400).json({
         error: "Invalid x402 payment",
         message: "Missing authorization in payment payload",
       });
     }
+    
+    // Combine authorization and signature for payment processor
+    const authorizationWithSignature = {
+      ...paymentAuth,
+      signature: paymentSignature, // Add signature to authorization object
+    };
 
     // Get payment token address
     let paymentTokenAddress: `0x${string}`;
@@ -1359,7 +1367,7 @@ app.post("/api/mint/:address", async (req, res) => {
     try {
       const paymentQueueId = await paymentQueueProcessor.addToQueue(
         'mint',
-        paymentAuth,
+        authorizationWithSignature, // Include signature for payment processor
         payer,
         expectedPrice.toString(),
         paymentTokenAddress,
