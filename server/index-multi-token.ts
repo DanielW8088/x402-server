@@ -522,10 +522,57 @@ async function verifyX402Payment(
     });
     
     if (verifyResult.isValid) {
+      const payer = verifyResult.payer || paymentPayload.from as string;
+      const amount = BigInt(paymentPayload.value || expectedAmount);
+      
+      // 🛡️ DEFENSE: Check balance and allowance before accepting payment
+      const paymentTokenAddress = paymentRequirements.asset as `0x${string}`;
+      const launchToolAddress = paymentRequirements.payTo as `0x${string}`;
+      
+      try {
+        // Check user's USDC balance
+        const balance = await publicClient.readContract({
+          address: paymentTokenAddress,
+          abi: parseAbi(['function balanceOf(address) view returns (uint256)']),
+          functionName: 'balanceOf',
+          args: [payer as `0x${string}`],
+        });
+        
+        // Check user's allowance to LaunchTool
+        const allowance = await publicClient.readContract({
+          address: paymentTokenAddress,
+          abi: parseAbi(['function allowance(address,address) view returns (uint256)']),
+          functionName: 'allowance',
+          args: [payer as `0x${string}`, launchToolAddress],
+        });
+        
+        console.log(`💰 Balance check - Required: ${amount}, Balance: ${balance}, Allowance: ${allowance}`);
+        
+        if (balance < amount) {
+          return {
+            valid: false,
+            error: `Insufficient balance: have ${balance}, need ${amount}`,
+          };
+        }
+        
+        if (allowance < amount) {
+          return {
+            valid: false,
+            error: `Insufficient allowance: have ${allowance}, need ${amount}`,
+          };
+        }
+      } catch (balanceError: any) {
+        console.error('❌ Balance check failed:', balanceError.message);
+        return {
+          valid: false,
+          error: `Balance check failed: ${balanceError.message}`,
+        };
+      }
+      
       return {
         valid: true,
-        payer: verifyResult.payer || paymentPayload.from as string,
-        amount: BigInt(paymentPayload.value || expectedAmount),
+        payer,
+        amount,
       };
     } else {
       // Debug: Try to recover signer address to verify signature correctness
@@ -1329,6 +1376,7 @@ app.post("/api/mint/:address", async (req, res) => {
       
     // 🔒 SECURE X402 ASYNC MODE: Payment FIRST, then mints via callback
     // Extract authorization from x402 payment
+
     const paymentAuth = paymentPayload.payload?.authorization;
     const paymentSignature = paymentPayload.payload?.signature;
     
@@ -1337,6 +1385,31 @@ app.post("/api/mint/:address", async (req, res) => {
         error: "Invalid x402 payment",
         message: "Missing authorization in payment payload",
       });
+    }
+    
+    // 🛡️ RATE LIMITING: Check pending payments for this user
+    if (pool) {
+      try {
+        const pendingCountResult = await pool.query(
+          `SELECT COUNT(*) as count FROM payment_queue 
+           WHERE payer = $1 AND status IN ('pending', 'processing', 'sent')`,
+          [payer]
+        );
+        const pendingCount = parseInt(pendingCountResult.rows[0].count);
+        const maxPendingPerUser = 10; // Max 10 pending payments per user
+        
+        if (pendingCount >= maxPendingPerUser) {
+          console.log(`🚫 Rate limit: User ${payer} has ${pendingCount} pending payments`);
+          return res.status(429).json({
+            error: "Too many pending payments",
+            message: `You have ${pendingCount} pending payments. Please wait for them to complete.`,
+            pendingCount,
+          });
+        }
+      } catch (rateLimitError: any) {
+        console.error('⚠️ Rate limit check failed:', rateLimitError.message);
+        // Don't block the request if rate limit check fails
+      }
     }
     
     // Combine authorization and signature for payment processor
