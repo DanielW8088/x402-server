@@ -25,6 +25,7 @@ import { baseSepolia, base } from "viem/chains";
 import * as dotenv from "dotenv";
 import { createRPCBalancer } from "./lib/rpc-balancer.js";
 import { resolve } from "path";
+import { lpDeployerPrivateKey } from "./config/env.js";
 
 // Load environment variables from .env file (explicitly from current directory)
 dotenv.config({ path: resolve(process.cwd(), '.env') });
@@ -277,7 +278,7 @@ class StandaloneLPDeployer {
     // Validate environment variables
     const missingVars: string[] = [];
     if (!process.env.DATABASE_URL) missingVars.push("DATABASE_URL");
-    if (!process.env.LP_DEPLOYER_PRIVATE_KEY) missingVars.push("LP_DEPLOYER_PRIVATE_KEY");
+    // LP_DEPLOYER_PRIVATE_KEY now loaded from secure file via config/env.ts
     if (!process.env.LAUNCH_TOOL_ADDRESS) missingVars.push("LAUNCH_TOOL_ADDRESS");
 
     if (missingVars.length > 0) {
@@ -344,7 +345,7 @@ class StandaloneLPDeployer {
     });
 
     // Single wallet for all operations (token owner + LP deployer)
-    const account = privateKeyToAccount(process.env.LP_DEPLOYER_PRIVATE_KEY as `0x${string}`);
+    const account = privateKeyToAccount(lpDeployerPrivateKey);
     this.walletClient = createWalletClient({
       account,
       chain,

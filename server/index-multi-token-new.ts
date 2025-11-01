@@ -37,7 +37,6 @@ import { createAIAgentRouter } from "./routes/ai-agent.js";
 
 // Import helpers
 import { generateMintTxHash } from "./lib/helpers.js";
-import { log } from "./lib/logger.js";
 
 // Validate environment variables
 validateEnv();
@@ -89,19 +88,19 @@ paymentQueueProcessor = new PaymentQueueProcessor(
         // Auto-verification
         setTimeout(async () => {
           try {
-            log.verify(`Starting automatic verification for ${savedToken.address}...`);
+            console.log(`🔍 Starting automatic verification for ${savedToken.address}...`);
             const verifyResult = await verifyContract(pool, savedToken.address);
             
             if (verifyResult.success) {
-              log.success(`Auto-verification successful for ${savedToken.address}`);
+              console.log(`✅ Auto-verification successful for ${savedToken.address}`);
               if (verifyResult.guid) {
-                log.info(`   GUID: ${verifyResult.guid}`);
+                console.log(`   GUID: ${verifyResult.guid}`);
               }
             } else {
-              log.warn(`Auto-verification failed for ${savedToken.address}: ${verifyResult.error}`);
+              console.warn(`⚠️  Auto-verification failed for ${savedToken.address}: ${verifyResult.error}`);
             }
           } catch (verifyError: any) {
-            log.warn(`Auto-verification error for ${savedToken.address}: ${verifyError.message}`);
+            console.warn(`⚠️  Auto-verification error for ${savedToken.address}: ${verifyError.message}`);
           }
         }, 15000);
         
@@ -112,14 +111,14 @@ paymentQueueProcessor = new PaymentQueueProcessor(
           blockNumber: savedToken.deploy_block_number,
         };
       } catch (error: any) {
-        log.failure(`Deployment failed after payment:`, error.message);
+        console.error(`❌ Deployment failed after payment:`, error.message);
         throw error;
       }
     }
     
     if (item.payment_type === 'mint' && item.metadata) {
       if (item.metadata.x402) {
-        log.debug(`x402 payment completed, mints will be added by main flow`);
+        console.log(`   ✅ x402 payment completed, mints will be added by main flow`);
         return {
           success: true,
           x402: true,
@@ -156,7 +155,7 @@ paymentQueueProcessor = new PaymentQueueProcessor(
           quantity,
         };
       } catch (error: any) {
-        log.failure(`Failed to queue mints after payment:`, error.message);
+        console.error(`❌ Failed to queue mints after payment:`, error.message);
         throw error;
       }
     }
@@ -208,8 +207,8 @@ async function start() {
     
     await aiAgentExecutor.start();
   } else if (aiAgentEnabled && !process.env.AGENT_ENCRYPTION_KEY) {
-    log.warn('AI Agent enabled but AGENT_ENCRYPTION_KEY not set. Agent will not start.');
-    log.warn('   Generate key with: node scripts/generate-agent-key.js');
+    console.warn('⚠️  AI Agent enabled but AGENT_ENCRYPTION_KEY not set. Agent will not start.');
+    console.warn('   Generate key with: node scripts/generate-agent-key.js');
   }
 
   // Initialize queue processor
@@ -256,25 +255,24 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    log.startup(`\n🚀 Multi-Token Mint Server Started`);
-    log.startup(`   Port: ${PORT}`);
-    log.startup(`   Network: ${network}`);
-    log.startup(`   Database: ✅ Connected`);
-    log.startup(`   Redis: ${redis ? '✅ Connected' : '⚠️  Disabled'}`);
-    log.startup(`   Log Level: ${process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'INFO' : 'DEBUG')}`);
-    log.startup(`\n💰 Wallet Configuration:`);
-    log.startup(`   SERVER (USDC payments): ${serverAccount.address}`);
-    log.startup(`   MINTER (mint execution): ${minterAccount.address}`);
-    log.startup(`\n⚙️  Queue Processors:`);
-    log.startup(`   Payment Queue: ${paymentQueueConfigDisplay}`);
-    log.startup(`   Mint Queue: ${mintQueueConfigDisplay}`);
-    log.startup(`   x402: ${x402Enabled ? '✅ Enabled' : '❌ Disabled'}`);
-    log.startup(`\n🤖 AI Agent:`);
-    log.startup(`   Status: ${aiAgentExecutor ? '✅ Running' : '⏸️  Disabled'}`);
+    console.log(`\n🚀 Multi-Token Mint Server Started`);
+    console.log(`   Port: ${PORT}`);
+    console.log(`   Network: ${network}`);
+    console.log(`   Database: ✅ Connected`);
+    console.log(`   Redis: ${redis ? '✅ Connected' : '⚠️  Disabled'}`);
+    console.log(`\n💰 Wallet Configuration:`);
+    console.log(`   SERVER (USDC payments): ${serverAccount.address}`);
+    console.log(`   MINTER (mint execution): ${minterAccount.address}`);
+    console.log(`\n⚙️  Queue Processors:`);
+    console.log(`   Payment Queue: ${paymentQueueConfigDisplay}`);
+    console.log(`   Mint Queue: ${mintQueueConfigDisplay}`);
+    console.log(`   x402: ${x402Enabled ? '✅ Enabled' : '❌ Disabled'}`);
+    console.log(`\n🤖 AI Agent:`);
+    console.log(`   Status: ${aiAgentExecutor ? '✅ Running' : '⏸️  Disabled'}`);
     if (aiAgentExecutor) {
-      log.startup(`   Features: Chat + Auto Mint`);
+      console.log(`   Features: Chat + Auto Mint`);
     }
-    log.startup(``);
+    console.log(``);
   });
 }
 
@@ -282,24 +280,24 @@ start().catch(console.error);
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  log.info('\n🛑 Shutting down gracefully...');
+  console.log('\n🛑 Shutting down gracefully...');
   queueProcessor.stop();
   paymentQueueProcessor.stop();
   if (aiAgentExecutor) aiAgentExecutor.stop();
   if (redis) await redis.quit();
   await pool.end();
-  log.info('✅ Shutdown complete');
+  console.log('✅ Shutdown complete');
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
-  log.info('\n🛑 Shutting down gracefully...');
+  console.log('\n🛑 Shutting down gracefully...');
   queueProcessor.stop();
   paymentQueueProcessor.stop();
   if (aiAgentExecutor) aiAgentExecutor.stop();
   if (redis) await redis.quit();
   await pool.end();
-  log.info('✅ Shutdown complete');
+  console.log('✅ Shutdown complete');
   process.exit(0);
 });
 

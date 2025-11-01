@@ -5,6 +5,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Pool } from 'pg';
 import { privateKeyToAccount } from 'viem/accounts';
+import { lpDeployerPrivateKey, minterPrivateKey } from '../config/env.js';
 
 const execAsync = promisify(exec);
 
@@ -108,22 +109,12 @@ export async function deployToken(config: TokenDeployConfig): Promise<DeployResu
 
   // Excess recipient (defaults to deployer if not specified)
   const excessRecipient = config.excessRecipient || config.deployer;
-
-  // Get LP deployer address from environment
-  const lpDeployerPrivateKey = process.env.LP_DEPLOYER_PRIVATE_KEY as string;
-  if (!lpDeployerPrivateKey) {
-    throw new Error('LP_DEPLOYER_PRIVATE_KEY environment variable required');
-  }
   
-  // Derive LP deployer address from private key
-  const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
+  // Derive LP deployer address from private key (loaded from secure file)
+  const lpAccount = privateKeyToAccount(lpDeployerPrivateKey);
   const lpDeployerAddress = lpAccount.address;
-
-  // Get minter private key for granting MINTER_ROLE
-  const minterPrivateKey = process.env.MINTER_PRIVATE_KEY as string;
-  if (!minterPrivateKey) {
-    throw new Error('MINTER_PRIVATE_KEY environment variable required');
-  }
+  
+  // Minter private key also loaded from secure file
   
   // Derive minter address from private key
   const minterAccount = privateKeyToAccount(minterPrivateKey as `0x${string}`);
@@ -352,13 +343,8 @@ export async function saveDeployedToken(
     : networkConfig.usdt || networkConfig.usdc;
 
   // Get LP deployer address from environment
-  const lpDeployerPrivateKey = process.env.LP_DEPLOYER_PRIVATE_KEY as string;
-  if (!lpDeployerPrivateKey) {
-    throw new Error('LP_DEPLOYER_PRIVATE_KEY environment variable required');
-  }
-  
-  // Derive LP deployer address from private key
-  const lpAccount = privateKeyToAccount(lpDeployerPrivateKey as `0x${string}`);
+  // Derive LP deployer address from private key (loaded from secure file)
+  const lpAccount = privateKeyToAccount(lpDeployerPrivateKey);
   const lpDeployerAddress = lpAccount.address;
 
   // Excess recipient (defaults to deployer if not specified)
