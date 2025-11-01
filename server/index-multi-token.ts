@@ -311,24 +311,14 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
     }
     
     if (item.payment_type === 'mint' && item.metadata) {
-      // 🔧 FIX: Skip x402 payments - they are handled by main flow
-      if (item.metadata.x402) {
-        console.log(`   ✅ x402 payment completed, mints will be added by main flow`);
-        return {
-          success: true,
-          x402: true,
-          message: 'x402 mints handled by main flow'
-        };
-      }
-      
-      // Payment for mint completed, add mints to mint queue (traditional mode only)
-      const { quantity } = item.metadata;
+      // 🔒 SECURE: Payment confirmed, now create mint queue items
+      const { quantity, mode, paymentHeader, timestamp: paymentTimestamp } = item.metadata;
       const tokenAddress = item.token_address!;
       const payer = item.payer;
       
       try {
         const queueIds: string[] = [];
-        const timestamp = Date.now();
+        const timestamp = paymentTimestamp || Date.now();
         
         // Generate mint tx hashes and add to queue
         for (let i = 0; i < quantity; i++) {
@@ -338,19 +328,22 @@ const paymentQueueProcessor = new PaymentQueueProcessor(
           const queueId = await queueProcessor.addToQueue(
             payer,
             txHashBytes32,
-            txHash, // 🔧 FIX: Attach payment tx to ALL mints for tracking
-            item.authorization,
-            'traditional',
+            txHash, // Payment tx hash - links mint to payment
+            mode === 'x402' ? { paymentHeader } : item.authorization, // Store payment data
+            mode || 'x402', // Default to x402
             tokenAddress
           );
           
           queueIds.push(queueId);
         }
         
+        console.log(`✅ Created ${queueIds.length}x mint queue items after ${mode} payment confirmation`);
+        
         return {
           success: true,
           queueIds,
           quantity,
+          mode,
         };
       } catch (error: any) {
         console.error(`❌ Failed to queue mints after payment:`, error.message);
@@ -1253,14 +1246,15 @@ app.post("/api/mint/:address", async (req, res) => {
       });
     }
     
-    // Determine payer address and payment mode
+    // 🚀 ALL PAYMENTS MUST USE X402
+    if (!useX402) {
+      return res.status(400).json({
+        error: "x402 payment required",
+        message: "All payments must use x402 protocol",
+      });
+    }
+
     let payer: `0x${string}`;
-    let paymentTxHash: string | undefined;
-    let paymentMode: "x402" | "traditional";
-    
-    // Branch based on payment method
-    if (useX402) {
-      paymentMode = "x402";
       
       // Get token price for x402 verification
       let expectedPrice: bigint;
@@ -1296,307 +1290,72 @@ app.post("/api/mint/:address", async (req, res) => {
         });
       }
       
-      // Then settle x402 payment (on-chain settlement)
-      const settleResult = await settleX402Payment(paymentHeader!, tokenAddress, expectedPrice, quantity, req);
-      
-      if (!settleResult.success) {
-        return res.status(400).json({
-          error: "x402 payment settlement failed",
-          message: settleResult.error || "Failed to settle payment on-chain",
-        });
-      }
-      
-      paymentTxHash = settleResult.txHash;
-      
-    } else {
-      // Traditional EIP-3009 mode
-      paymentMode = "traditional";
-      payer = authorization.from as `0x${string}`;
-      
-      // Get token info for payment token address
-      let paymentTokenAddress: `0x${string}`;
-      if (pool) {
-        const dbToken = await getToken(pool, tokenAddress);
-        if (dbToken) {
-          paymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
-        } else {
-          // Fallback to USDC
-          paymentTokenAddress = network === 'base-sepolia' 
-            ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
-            : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
-        }
+    // 🔒 SECURE X402 ASYNC MODE: Payment FIRST, then mints via callback
+    // Extract authorization from x402 payment
+    const paymentAuth = paymentPayload.payload?.authorization;
+    if (!paymentAuth) {
+      return res.status(400).json({
+        error: "Invalid x402 payment",
+        message: "Missing authorization in payment payload",
+      });
+    }
+
+    // Get payment token address
+    let paymentTokenAddress: `0x${string}`;
+    if (pool) {
+      const dbToken = await getToken(pool, tokenAddress);
+      if (dbToken) {
+        paymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
       } else {
         paymentTokenAddress = network === 'base-sepolia' 
           ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
           : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
       }
-    
-      // Verify authorization is to the correct token contract address
-      if (getAddress(authorization.to) !== getAddress(tokenAddress)) {
-        return res.status(400).json({
-          error: "Invalid payment recipient",
-          message: `Payment must be sent to token contract ${tokenAddress}, but was sent to ${authorization.to}`,
-        });
-      }
-    
-      // 🔒 CRITICAL: Verify payment amount matches token price * quantity
-      let expectedPrice: bigint;
-      if (pool) {
-        const dbToken = await getToken(pool, tokenAddress);
-        if (!dbToken) {
-          return res.status(404).json({
-            error: "Token not found",
-            message: `Token ${tokenAddress} not found in database`,
-          });
-        }
-        // Extract price from "1 USDC" format
-        const priceMatch = dbToken.price.match(/[\d.]+/);
-        if (!priceMatch) {
-          return res.status(500).json({
-            error: "Invalid token price",
-            message: "Token price format is invalid in database",
-          });
-        }
-        const priceInUSDC = parseFloat(priceMatch[0]);
-        expectedPrice = BigInt(Math.floor(priceInUSDC * 1e6)) * BigInt(quantity); // Convert to USDC wei (6 decimals) and multiply by quantity
-      } else {
-        return res.status(503).json({
-          error: "Database not configured",
-          message: "Cannot verify payment amount without database",
-        });
-      }
-      
-      const providedValue = BigInt(authorization.value);
-      if (providedValue !== expectedPrice) {
-        return res.status(400).json({
-          error: "Invalid payment amount",
-          message: `Payment must be exactly ${Number(expectedPrice) / 1e6} USDC (${expectedPrice.toString()} wei) for ${quantity}x mint, but got ${Number(providedValue) / 1e6} USDC`,
-          expected: expectedPrice.toString(),
-          provided: providedValue.toString(),
-        });
-      }
-    
-      // Add payment to queue (serial processing to avoid nonce conflicts)
-      try {
-        const paymentQueueId = await paymentQueueProcessor.addToQueue(
-          'mint',
-          authorization,
-          payer,
-          authorization.value,
-          paymentTokenAddress,
-          tokenAddress,
-          { quantity } // metadata
-        );
-        
-        // Poll for payment completion (with timeout) - same as x402 mode
-        const maxWaitTime = 30000; // 30 seconds
-        const pollInterval = 500; // Check every 500ms
-        const startTime = Date.now();
-
-        while (Date.now() - startTime < maxWaitTime) {
-          const status = await paymentQueueProcessor.getPaymentStatus(paymentQueueId);
-          
-          if (!status) {
-            return res.status(500).json({
-              error: "Payment status not found",
-              message: "Unable to track payment processing"
-            });
-          }
-
-          if (status.status === 'completed') {
-            paymentTxHash = status.tx_hash;
-            break; // Continue to mint processing
-          }
-
-          if (status.status === 'failed' || status.status === 'confirmation_failed') {
-            return res.status(400).json({
-              error: "Payment processing failed",
-              message: status.error || "Payment transaction failed",
-            });
-          }
-
-          // Still processing ('pending', 'processing', 'sent'), wait and check again
-          await new Promise(resolve => setTimeout(resolve, pollInterval));
-        }
-
-        // Check if timed out
-        if (!paymentTxHash) {
-          return res.status(408).json({
-            error: "Payment processing timeout",
-            message: "Payment is still being processed - check status later",
-            paymentQueueId,
-          });
-        }
-        
-        // 🔧 FIX: For traditional payment mode, mints are added by the payment callback
-        // Return early here to prevent duplicate mint queue entries
-        console.log(`✅ Traditional payment completed, mints will be added by callback`);
-        
-        if (!pool) {
-          return res.status(500).json({
-            error: "Database not configured",
-            message: "Cannot verify mint queue items without database",
-          });
-        }
-        
-        // Wait for callback to create mint queue items (with timeout)
-        let mintQueueItems: { rows: Array<{ id: string; status: string }> } | undefined;
-        const callbackWaitStart = Date.now();
-        const callbackMaxWait = 5000; // 5 seconds
-        
-        while (Date.now() - callbackWaitStart < callbackMaxWait) {
-          mintQueueItems = await pool.query(
-            `SELECT id, status FROM mint_queue 
-             WHERE payer_address = $1 
-             AND token_address = $2 
-             AND payment_tx_hash = $3
-             ORDER BY created_at DESC
-             LIMIT $4`,
-            [payer, tokenAddress, paymentTxHash, quantity]
-          );
-          
-          if (mintQueueItems.rows.length === quantity) {
-            break; // All mints created by callback
-          }
-          
-          // Wait a bit before checking again
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-        
-        if (!mintQueueItems || mintQueueItems.rows.length === 0) {
-          return res.status(500).json({
-            error: "Mints not found",
-            message: "Payment completed but mint queue items were not created by callback",
-          });
-        }
-        
-        if (mintQueueItems.rows.length !== quantity) {
-          console.warn(`⚠️  Expected ${quantity} mints, but found ${mintQueueItems.rows.length}`);
-        }
-        
-        const callbackQueueIds = mintQueueItems.rows.map((row: any) => row.id);
-        const firstQueueStatus = await queueProcessor.getQueueStatus(callbackQueueIds[0]);
-        
-        return res.status(200).json({
-          success: true,
-          message: `Added ${callbackQueueIds.length}x mint${callbackQueueIds.length > 1 ? 's' : ''} to queue (traditional payment)`,
-          queueId: callbackQueueIds[0],
-          queueIds: callbackQueueIds,
-          quantity: callbackQueueIds.length,
-          payer,
-          paymentMode: 'traditional',
-          status: firstQueueStatus.status,
-          queuePosition: firstQueueStatus.queuePosition,
-          estimatedWaitSeconds: firstQueueStatus.estimatedWaitSeconds,
-          paymentTxHash: paymentTxHash,
-        });
-      } catch (error: any) {
-        return res.status(400).json({
-          error: "Failed to queue payment",
-          message: error.message,
-        });
-      }
-    } // End of traditional payment mode
-
-    // 🔧 x402 payment mode continues here (no callback, so we add mints directly)
-    
-    // Check remaining supply
-    const [remainingSupply, mintAmountPerPayment] = await Promise.all([
-      publicClient.readContract({
-        address: tokenContractAddress,
-        abi: tokenAbi,
-        functionName: "remainingSupply",
-      }),
-      publicClient.readContract({
-        address: tokenContractAddress,
-        abi: tokenAbi,
-        functionName: "mintAmount",
-      }),
-    ]);
-
-    if (remainingSupply < mintAmountPerPayment * BigInt(quantity)) {
-      return res.status(400).json({
-        error: "Insufficient remaining supply",
-        message: `Only ${remainingSupply} tokens remaining, but ${quantity}x mint requires ${mintAmountPerPayment * BigInt(quantity)} tokens`,
-      });
+    } else {
+      paymentTokenAddress = network === 'base-sepolia' 
+        ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as `0x${string}`
+        : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' as `0x${string}`;
     }
 
-    // Add quantity mints to queue (each with unique txHash) - Only for x402 mode
-    const queueIds: string[] = [];
-    const timestamp = Date.now();
-    
-    for (let i = 0; i < quantity; i++) {
-      // Generate unique transaction hash for each mint
-      const txHashBytes32 = generateMintTxHash(payer, timestamp + i, tokenAddress);
-      
-      // Check if already minted on-chain
-      const alreadyMinted = await publicClient.readContract({
-        address: tokenContractAddress,
-        abi: tokenAbi,
-        functionName: "hasMinted",
-        args: [txHashBytes32],
-      });
-
-      if (alreadyMinted) {
-        continue;
-      }
-
-      // Add to queue
-      const queueId = await queueProcessor.addToQueue(
+    // 🔒 CRITICAL: Add payment to queue FIRST
+    // Mints will be created by payment callback ONLY after payment is confirmed on-chain
+    try {
+      const paymentQueueId = await paymentQueueProcessor.addToQueue(
+        'mint',
+        paymentAuth,
         payer,
-        txHashBytes32,
-        paymentTxHash, // 🔧 FIX: Attach payment tx to ALL mints for tracking
-        useX402 ? { paymentHeader } : authorization, // Store payment data based on mode
-        paymentMode, // "x402" or "traditional"
-        tokenAddress
+        expectedPrice.toString(),
+        paymentTokenAddress,
+        tokenAddress,
+        { 
+          quantity, 
+          mode: 'x402',
+          paymentHeader, // Store full payment header for mint creation
+          timestamp: Date.now(), // For generating mint txHashes in callback
+        }
       );
-      
-      queueIds.push(queueId);
-    }
 
-    if (queueIds.length === 0) {
-      return res.status(200).json({
+      console.log(`✅ X402 payment queued: ${paymentQueueId} (${quantity}x mint will be created after payment confirms)`);
+      
+      // ✅ IMMEDIATE RETURN - Payment processes in background
+      // Mints will be created ONLY after payment is confirmed (via callback)
+      return res.status(202).json({ // 202 Accepted
         success: true,
-        message: "All mints already completed",
+        message: `Payment queued - ${quantity}x mint will start after payment confirms`,
+        paymentQueueId,
+        quantity,
         payer,
+        paymentMode: 'x402',
+        status: 'payment_pending',
+        note: 'Poll /api/payment/:paymentQueueId for status. Mints will be created automatically after payment confirms.',
+      });
+      
+    } catch (error: any) {
+      return res.status(500).json({
+        error: "Failed to queue payment",
+        message: error.message,
       });
     }
-
-    // Get queue status for first mint
-    const queueStatus = await queueProcessor.getQueueStatus(queueIds[0]);
-
-    const response: any = {
-      success: true,
-      message: `Added ${queueIds.length}x mint${queueIds.length > 1 ? 's' : ''} to queue (${paymentMode} payment)`,
-      queueId: queueIds[0], // Return first queue ID for compatibility
-      queueIds, // Return all queue IDs
-      quantity: queueIds.length,
-      payer,
-      paymentMode, // "x402" or "traditional"
-      status: queueStatus.status,
-      queuePosition: queueStatus.queue_position,
-      estimatedWaitSeconds: queueStatus.queue_position * 10, // rough estimate
-      amount: (mintAmountPerPayment * BigInt(queueIds.length)).toString(),
-      paymentTxHash: paymentTxHash,
-    };
-
-    // Add x402 payment confirmation header if using x402
-    if (useX402 && paymentTxHash) {
-      // Create payment receipt for x402 response header
-      const paymentReceipt = {
-        success: true,
-        transaction: paymentTxHash,
-        payer: payer,
-        amount: (mintAmountPerPayment * BigInt(queueIds.length)).toString(),
-        timestamp: Date.now(),
-      };
-      
-      // Encode receipt as base64 for X-PAYMENT-RESPONSE header
-      const receiptBase64 = Buffer.from(JSON.stringify(paymentReceipt)).toString('base64');
-      res.setHeader('X-PAYMENT-RESPONSE', receiptBase64);
-    }
-
-    return res.status(200).json(response);
   } catch (error: any) {
     return res.status(500).json({
       error: "Mint failed",
