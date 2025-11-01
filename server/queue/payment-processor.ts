@@ -416,6 +416,7 @@ export class PaymentQueueProcessor {
 
     try {
       // Check transaction receipt
+      // Note: getTransactionReceipt throws if tx not found, so we catch that below
       const receipt = await this.publicClient.getTransactionReceipt({
         hash: txHash as `0x${string}`,
       });
@@ -466,10 +467,16 @@ export class PaymentQueueProcessor {
 
     } catch (error: any) {
       // Check if it's just "not found yet" vs actual failure
-      if (error.message?.includes('not found') || error.message?.includes('Transaction not found')) {
+      // viem throws "could not be found" or "not be processed on a block yet"
+      const isNotFoundYet = error.message?.includes('could not be found') || 
+                           error.message?.includes('not found') || 
+                           error.message?.includes('not be processed') ||
+                           error.message?.includes('Transaction not found');
+      
+      if (isNotFoundYet) {
         // Still pending, check age
         const age = Date.now() - new Date(row.processed_at).getTime();
-        if (age > 300000) { // 5 minutes
+        if (age > 300000) { // 5 minutes timeout
           console.error(`❌ Payment confirmation timeout (5min): ${paymentId.slice(0, 8)}...`);
           
           await this.pool.query(
@@ -481,7 +488,8 @@ export class PaymentQueueProcessor {
 
           return false;
         }
-        return false; // Still waiting
+        // Still waiting - this is NORMAL for first few seconds after tx is sent
+        return false;
       }
 
       // Actual failure (reverted, etc)
