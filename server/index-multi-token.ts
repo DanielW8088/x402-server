@@ -72,7 +72,29 @@ let aiAgentExecutor: AIAgentTaskExecutor | null = null;
 let queueProcessor: MintQueueProcessor;
 let paymentQueueProcessor: PaymentQueueProcessor;
 
-// Initialize payment queue processor
+// In-memory cache for token info (fallback when Redis not available)
+const tokenInfoCache = new Map<string, { data: any; expiry: number }>();
+const TOKEN_CACHE_TTL_MS = 60 * 1000; // 60 seconds (1 minute)
+
+// Clean up expired cache entries every 2 minutes
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  
+  for (const [key, entry] of tokenInfoCache.entries()) {
+    if (entry.expiry < now) {
+      tokenInfoCache.delete(key);
+      cleanedCount++;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned up ${cleanedCount} expired cache entries. Current size: ${tokenInfoCache.size}`);
+  }
+}, 120000); // Every 2 minutes
+
+// Initialize payment queue processor for serial payment processing
+// Use SERVER wallet for receiving USDC payments (prevents nonce conflicts)
 paymentQueueProcessor = new PaymentQueueProcessor(
   pool,
   serverWalletClient,
@@ -119,6 +141,7 @@ paymentQueueProcessor = new PaymentQueueProcessor(
     }
     
     if (item.payment_type === 'mint' && item.metadata) {
+      // Check if this is an x402 payment from ai-mint branch
       if (item.metadata.x402) {
         log.debug(`x402 payment completed, mints will be added by main flow`);
         return {
@@ -128,7 +151,8 @@ paymentQueueProcessor = new PaymentQueueProcessor(
         };
       }
       
-      const { quantity, recipient: metadataRecipient } = item.metadata;
+      // 🔒 SECURE: Payment confirmed, now create mint queue items
+      const { quantity, mode, paymentHeader, timestamp: paymentTimestamp, recipient: metadataRecipient } = item.metadata;
       const tokenAddress = item.token_address!;
       const payer = item.payer;
       const recipient = metadataRecipient || payer; // Use recipient from metadata or default to payer
@@ -137,7 +161,7 @@ paymentQueueProcessor = new PaymentQueueProcessor(
       
       try {
         const queueIds: string[] = [];
-        const timestamp = Date.now();
+        const timestamp = paymentTimestamp || Date.now();
         
         for (let i = 0; i < quantity; i++) {
           const txHashBytes32 = generateMintTxHash(recipient, timestamp + i, tokenAddress);
@@ -145,9 +169,9 @@ paymentQueueProcessor = new PaymentQueueProcessor(
           const queueId = await queueProcessor.addToQueue(
             payer,
             txHashBytes32,
-            txHash,
-            item.authorization,
-            'traditional',
+            item.tx_hash,
+            mode === 'x402' ? { paymentHeader } : item.authorization, // Store payment data
+            mode || 'x402', // Default to x402
             tokenAddress,
             recipient // Pass recipient to queue!
           );
@@ -155,10 +179,13 @@ paymentQueueProcessor = new PaymentQueueProcessor(
           queueIds.push(queueId);
         }
         
+        console.log(`✅ Created ${queueIds.length}x mint queue items after ${mode} payment confirmation`);
+        
         return {
           success: true,
           queueIds,
           quantity,
+          mode,
         };
       } catch (error: any) {
         log.failure(`Failed to queue mints after payment:`, error.message);
@@ -169,6 +196,10 @@ paymentQueueProcessor = new PaymentQueueProcessor(
     return null;
   }
 );
+
+// Note: LP deployment is now handled by a separate standalone service
+// See: server/lp-deployer-standalone.ts
+// Run with: npm run lp-deployer
 
 // Health check
 app.get("/health", (req, res) => {

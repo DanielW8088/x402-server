@@ -273,6 +273,7 @@ class StandaloneLPDeployer {
   private processingTokens: Set<string> = new Set();
   private isProcessing: boolean = false;
   private network: string;
+  private isMainnet: boolean;
 
   constructor() {
     // Validate environment variables
@@ -305,14 +306,16 @@ class StandaloneLPDeployer {
 
     // Network config
     this.network = process.env.NETWORK || "baseSepolia";
-    const chain = this.network === "base" ? base : baseSepolia;
+    // Support both "base" and "base-sepolia" formats
+    this.isMainnet = this.network === "base" || this.network === "base-mainnet";
+    const chain = this.isMainnet ? base : baseSepolia;
 
     // RPC Load Balancer - supports multiple RPC URLs
     const rpcBalancer = createRPCBalancer(
-      this.network === "base"
+      this.isMainnet
         ? process.env.BASE_RPC_URL
         : process.env.BASE_SEPOLIA_RPC_URL,
-      this.network === "base"
+      this.isMainnet
         ? "https://mainnet.base.org"
         : "https://sepolia.base.org"
     );
@@ -321,7 +324,7 @@ class StandaloneLPDeployer {
     this.launchToolAddress = process.env.LAUNCH_TOOL_ADDRESS as `0x${string}`;
     
     // Factory address
-    this.factoryAddress = (this.network === "base"
+    this.factoryAddress = (this.isMainnet
       ? "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
       : "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24") as `0x${string}`;
 
@@ -415,7 +418,10 @@ class StandaloneLPDeployer {
            created_at ASC`
       );
 
-      if (result.rows.length === 0) return;
+      if (result.rows.length === 0) {
+        console.log(`\n✓ No tokens pending LP deployment (checked at ${new Date().toLocaleTimeString()})`);
+        return; // isProcessing will be reset in finally block
+      }
 
       console.log(`\n🔍 Found ${result.rows.length} token(s) pending LP deployment...`);
 
@@ -1008,7 +1014,7 @@ class StandaloneLPDeployer {
       throw new Error("LP not marked as live");
     }
 
-    const explorerBase = this.network === "base"
+    const explorerBase = this.isMainnet
       ? "https://basescan.org"
       : "https://sepolia.basescan.org";
 

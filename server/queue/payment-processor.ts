@@ -15,7 +15,7 @@ export interface PaymentQueueItem {
   amount: string;
   payment_token_address: string;
   metadata?: any; // Additional data (deployment config, mint params, etc.)
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'processing' | 'sent' | 'completed' | 'failed' | 'confirmation_failed';
   tx_hash?: string;
   error?: string;
   result?: any; // Processing result (deployed token address, mint tx, etc.)
@@ -45,6 +45,8 @@ export class PaymentQueueProcessor {
   private batchIntervalMs: number = 4000; // Process every 4000ms (4 seconds) - give time for tx confirmations
   private batchSize: number = 10; // Number of payments to process in parallel per batch
   private onPaymentCompleted?: PaymentCompletedCallback;
+  private confirmationIntervalMs: number = 2000; // Check confirmations every 2 seconds
+  private confirmationInterval: NodeJS.Timeout | null = null;
 
   constructor(
     pool: Pool,
@@ -97,6 +99,12 @@ export class PaymentQueueProcessor {
       this.batchIntervalMs
     );
 
+    // Start confirmation loop
+    this.confirmationInterval = setInterval(
+      () => this.processConfirmations(),
+      this.confirmationIntervalMs
+    );
+
     console.log(`✅ PaymentQueueProcessor started (batch every ${this.batchIntervalMs}ms, size: ${this.batchSize})`);
   }
 
@@ -107,6 +115,10 @@ export class PaymentQueueProcessor {
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
       this.processingInterval = null;
+    }
+    if (this.confirmationInterval) {
+      clearInterval(this.confirmationInterval);
+      this.confirmationInterval = null;
     }
   }
 
@@ -229,6 +241,7 @@ export class PaymentQueueProcessor {
 
   /**
    * Process a single payment transaction
+   * 🚀 FAST MODE: Send tx and return immediately, confirm in background
    * @param row Payment queue item
    * @param preAssignedNonce Pre-assigned nonce for parallel processing
    */
@@ -281,7 +294,7 @@ export class PaymentQueueProcessor {
       
       const maxFeePerGas = (baseFeePerGas * 120n) / 100n + maxPriorityFeePerGas; // 120% of base + priority
 
-      // Execute transferWithAuthorization
+      // 🚀 Execute transferWithAuthorization (no await for confirmation)
       const txHash = await this.walletClient.writeContract({
         address: row.payment_token_address as `0x${string}`,
         abi: usdcAbi,
@@ -305,71 +318,21 @@ export class PaymentQueueProcessor {
         nonce, // Use managed nonce
       });
 
-      // Wait for confirmation with extended timeout (60 seconds)
-      // In high-load scenarios, transactions may take longer to confirm
-      let receipt;
-      try {
-        receipt = await this.publicClient.waitForTransactionReceipt({
-          hash: txHash,
-          confirmations: 1,
-          timeout: 60_000, // 60 seconds (default is ~12 seconds)
-        });
+      console.log(`📤 Sent payment tx: ${paymentId.slice(0, 8)}... (nonce: ${nonce}, tx: ${txHash.slice(0, 10)}...)`);
 
-        if (receipt.status !== "success") {
-          throw new Error("Payment transaction reverted");
-        }
-      } catch (timeoutError: any) {
-        // If timeout, we MUST throw error - cannot proceed without confirmation
-        // The tx might be reverted (insufficient balance, etc) and we can't know without receipt
-        // Security: Never mark as completed without verified receipt
-        if (timeoutError.message?.includes('timeout') || timeoutError.message?.includes('timed out')) {
-          console.log(`⚠️  Payment tx confirmation timeout: ${paymentId} (tx: ${txHash})`);
-          throw new Error(`Payment confirmation timeout - tx sent but not confirmed: ${txHash}`);
-        } else {
-          throw timeoutError; // Re-throw non-timeout errors
-        }
-      }
-
-      // Confirm nonce (only reached if receipt is verified)
+      // ✅ Confirm nonce immediately (tx sent successfully)
       this.nonceManager.confirmNonce(nonce);
 
-      // Call completion callback if provided (e.g., trigger deployment)
-      let result = null;
-      if (this.onPaymentCompleted) {
-        try {
-          const item: PaymentQueueItem = {
-            id: row.id,
-            payment_type: row.payment_type,
-            token_address: row.token_address,
-            authorization: row.authorization,
-            payer: row.payer,
-            amount: row.amount,
-            payment_token_address: row.payment_token_address,
-            metadata: row.metadata,
-            status: 'completed',
-            tx_hash: txHash,
-            created_at: row.created_at,
-          };
-          result = await this.onPaymentCompleted(item, txHash);
-        } catch (callbackError: any) {
-          console.error(`⚠️  Payment callback failed for ${paymentId}:`, callbackError.message);
-          // Don't fail payment if callback fails, just log
-        }
-      }
-
-      // Mark as completed
+      // 🔥 Mark as 'sent' (not completed yet, will confirm in background)
       await this.pool.query(
         `UPDATE payment_queue 
-         SET status = 'completed', tx_hash = $1, result = $2, processed_at = NOW() 
-         WHERE id = $3`,
-        [txHash, result ? JSON.stringify(result) : null, paymentId]
+         SET status = 'sent', tx_hash = $1, processed_at = NOW() 
+         WHERE id = $2`,
+        [txHash, paymentId]
       );
 
     } catch (error: any) {
-      console.error(`❌ Payment failed: ${paymentId}`, error.message);
-
-      // Don't resync nonce here - handled at batch level to prevent cascading conflicts
-      // Individual tx failures don't need immediate resync when processing in parallel batches
+      console.error(`❌ Payment send failed: ${paymentId.slice(0, 8)}...`, error.message);
 
       // Mark as failed
       await this.pool.query(
@@ -379,8 +342,7 @@ export class PaymentQueueProcessor {
         [error.message, paymentId]
       );
 
-      // 🔧 FIX: Clean up orphaned mint queue items for this failed payment
-      // Find and fail any pending/processing mints associated with this payment
+      // 🔧 Clean up orphaned mint queue items for this failed payment
       try {
         const cleanupResult = await this.pool.query(
           `UPDATE mint_queue mq
@@ -402,8 +364,164 @@ export class PaymentQueueProcessor {
         }
       } catch (cleanupError: any) {
         console.error(`   ⚠️  Failed to cleanup mint queue items:`, cleanupError.message);
-        // Don't throw - payment failure was already recorded
       }
+    }
+  }
+
+  /**
+   * 🔥 Process confirmations for 'sent' transactions
+   * Runs in background, checks multiple txs in parallel
+   */
+  private async processConfirmations(): Promise<void> {
+    try {
+      // Get all 'sent' payments that need confirmation
+      const result = await this.pool.query(
+        `SELECT * FROM payment_queue 
+         WHERE status = 'sent' 
+         AND processed_at > NOW() - INTERVAL '5 minutes'
+         ORDER BY processed_at ASC 
+         LIMIT 20`
+      );
+
+      if (result.rows.length === 0) {
+        return;
+      }
+
+      console.log(`🔍 Checking ${result.rows.length} pending confirmations...`);
+
+      // Check all confirmations in parallel
+      const confirmations = await Promise.allSettled(
+        result.rows.map(row => this.confirmPayment(row))
+      );
+
+      const confirmed = confirmations.filter(r => r.status === 'fulfilled' && r.value === true).length;
+      const failed = confirmations.filter(r => r.status === 'fulfilled' && r.value === false).length;
+      
+      if (confirmed > 0 || failed > 0) {
+        console.log(`   ✅ ${confirmed} confirmed${failed > 0 ? `, ❌ ${failed} failed` : ''}`);
+      }
+
+    } catch (error: any) {
+      console.error('❌ Confirmation processing error:', error.message);
+    }
+  }
+
+  /**
+   * Confirm a single payment transaction
+   * @returns true if confirmed, false if failed/timeout
+   */
+  private async confirmPayment(row: any): Promise<boolean> {
+    const paymentId = row.id;
+    const txHash = row.tx_hash;
+
+    try {
+      // Check transaction receipt
+      // Note: getTransactionReceipt throws if tx not found, so we catch that below
+      const receipt = await this.publicClient.getTransactionReceipt({
+        hash: txHash as `0x${string}`,
+      });
+
+      if (!receipt) {
+        // Transaction not mined yet, keep waiting
+        return false;
+      }
+
+      if (receipt.status !== "success") {
+        throw new Error("Payment transaction reverted");
+      }
+
+      // Transaction confirmed! Call completion callback
+      let result = null;
+      if (this.onPaymentCompleted) {
+        try {
+          const item: PaymentQueueItem = {
+            id: row.id,
+            payment_type: row.payment_type,
+            token_address: row.token_address,
+            authorization: row.authorization,
+            payer: row.payer,
+            amount: row.amount,
+            payment_token_address: row.payment_token_address,
+            metadata: row.metadata,
+            status: 'completed',
+            tx_hash: txHash,
+            created_at: row.created_at,
+            processed_at: row.processed_at,
+          };
+          result = await this.onPaymentCompleted(item, txHash);
+        } catch (callbackError: any) {
+          console.error(`⚠️  Payment callback failed for ${paymentId.slice(0, 8)}...:`, callbackError.message);
+          // Don't fail payment if callback fails
+        }
+      }
+
+      // Mark as completed
+      await this.pool.query(
+        `UPDATE payment_queue 
+         SET status = 'completed', result = $1 
+         WHERE id = $2 AND status = 'sent'`,
+        [result ? JSON.stringify(result) : null, paymentId]
+      );
+
+      return true;
+
+    } catch (error: any) {
+      // Check if it's just "not found yet" vs actual failure
+      // viem throws "could not be found" or "not be processed on a block yet"
+      const isNotFoundYet = error.message?.includes('could not be found') || 
+                           error.message?.includes('not found') || 
+                           error.message?.includes('not be processed') ||
+                           error.message?.includes('Transaction not found');
+      
+      if (isNotFoundYet) {
+        // Still pending, check age
+        const age = Date.now() - new Date(row.processed_at).getTime();
+        if (age > 300000) { // 5 minutes timeout
+          console.error(`❌ Payment confirmation timeout (5min): ${paymentId.slice(0, 8)}...`);
+          
+          await this.pool.query(
+            `UPDATE payment_queue 
+             SET status = 'confirmation_failed', error = $1 
+             WHERE id = $2 AND status = 'sent'`,
+            ['Transaction not found after 5 minutes', paymentId]
+          );
+
+          return false;
+        }
+        // Still waiting - this is NORMAL for first few seconds after tx is sent
+        return false;
+      }
+
+      // Actual failure (reverted, etc)
+      console.error(`❌ Payment confirmation failed: ${paymentId.slice(0, 8)}...`, error.message);
+      
+      await this.pool.query(
+        `UPDATE payment_queue 
+         SET status = 'confirmation_failed', error = $1 
+         WHERE id = $2 AND status = 'sent'`,
+        [error.message, paymentId]
+      );
+
+      // Cleanup orphaned mints
+      try {
+        await this.pool.query(
+          `UPDATE mint_queue mq
+           SET status = 'failed', 
+               error_message = 'Payment confirmation failed: ' || $1,
+               updated_at = NOW()
+           FROM payment_queue pq
+           WHERE pq.id = $2
+           AND mq.payer_address = pq.payer
+           AND mq.token_address = pq.token_address
+           AND mq.status IN ('pending', 'processing')
+           AND mq.created_at BETWEEN pq.created_at - INTERVAL '2 minutes' AND pq.created_at + INTERVAL '2 minutes'`,
+          [error.message, paymentId]
+        );
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
+
+      return false;
     }
   }
 
@@ -422,8 +540,10 @@ export class PaymentQueueProcessor {
     const stats: any = {
       pending: 0,
       processing: 0,
+      sent: 0,
       completed: 0,
       failed: 0,
+      confirmation_failed: 0,
     };
 
     result.rows.forEach(row => {
