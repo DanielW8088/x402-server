@@ -25,6 +25,7 @@ import crypto from "crypto";
 import { generateMintTxHash } from "./lib/helpers.js";
 import type { Account, PrivateKeyAccount } from "viem";
 import { aiAgentPrivateKey } from "./config/env.js";
+import { log } from "./lib/logger.js";
 
 // Load environment variables
 dotenv.config({ path: resolve(process.cwd(), '.env') });
@@ -36,6 +37,7 @@ const CHECK_INTERVAL = 10000; // 10 seconds to check for new tasks
 const MAX_BATCH_SIZE = 10; // Max 10 mints per batch
 const MIN_BATCH_SIZE = 1; // Min 1 mint per batch
 const MAX_RETRY_COUNT = 3; // Max 3 retries before marking as failed
+const PAYMENT_TIMEOUT = 10 * 60 * 1000; // 10 minutes timeout for pending_payment tasks
 
 // ==================== ABIs ====================
 
@@ -172,11 +174,11 @@ class AIMintExecutor {
     if (!process.env.DATABASE_URL) missingVars.push("DATABASE_URL");
 
     if (missingVars.length > 0) {
-      console.error("\n❌ Missing required environment variables:");
-      missingVars.forEach(v => console.error(`   - ${v}`));
-      console.error("\n💡 To fix:");
-      console.error("   1. Create .env file: cp env.multi-token.example .env");
-      console.error("   2. Set all required variables\n");
+      log.error("\n❌ Missing required environment variables:");
+      missingVars.forEach(v => log.error(`   - ${v}`));
+      log.error("\n💡 To fix:");
+      log.error("   1. Create .env file: cp env.multi-token.example .env");
+      log.error("   2. Set all required variables\n");
       throw new Error("Missing required environment variables");
     }
 
@@ -226,25 +228,27 @@ class AIMintExecutor {
     // Server URL for API calls
     this.serverUrl = process.env.SERVER_URL || "http://localhost:3000";
 
-    console.log(`╔════════════════════════════════════════════════════════════╗`);
-    console.log(`║          AI Mint Executor v1.0 Initialized               ║`);
-    console.log(`╚════════════════════════════════════════════════════════════╝`);
-    console.log(`\n🔧 Configuration:`);
-    console.log(`   Network: ${this.network}`);
-    console.log(`   Server URL: ${this.serverUrl}`);
-    console.log(`   RPC Endpoints: ${rpcBalancer.getStatus().totalUrls}`);
+    log.startup(`╔════════════════════════════════════════════════════════════╗`);
+    log.startup(`║          AI Mint Executor v1.1 Initialized               ║`);
+    log.startup(`╚════════════════════════════════════════════════════════════╝`);
+    log.startup(`\n🔧 Configuration:`);
+    log.startup(`   Network: ${this.network}`);
+    log.startup(`   Server URL: ${this.serverUrl}`);
+    log.startup(`   RPC Endpoints: ${rpcBalancer.getStatus().totalUrls}`);
     rpcBalancer.getUrls().forEach((url, i) => {
-      console.log(`      ${i + 1}. ${url}`);
+      log.startup(`      ${i + 1}. ${url}`);
     });
-    console.log(`   AI Agent Account: ${this.aiAgentAccount.address}`);
-    console.log(`   USDC: ${this.usdcAddress}`);
-    console.log(`   Mint Interval: ${MINT_INTERVAL / 1000}s`);
-    console.log(`   Check Interval: ${CHECK_INTERVAL / 1000}s`);
+    log.startup(`   AI Agent Account: ${this.aiAgentAccount.address}`);
+    log.startup(`   USDC: ${this.usdcAddress}`);
+    log.startup(`   Mint Interval: ${MINT_INTERVAL / 1000}s`);
+    log.startup(`   Check Interval: ${CHECK_INTERVAL / 1000}s`);
+    log.startup(`   Payment Timeout: ${PAYMENT_TIMEOUT / 60000} minutes`);
+    log.startup(`   Max Retry Count: ${MAX_RETRY_COUNT}`);
   }
 
   async start() {
-    console.log(`\n🚀 Starting AI Mint Executor...`);
-    console.log(`   Monitoring for funded tasks...\n`);
+    log.startup(`\n🚀 Starting AI Mint Executor...`);
+    log.startup(`   Monitoring for funded tasks...\n`);
 
     // Initial check
     await this.checkAndProcessTasks();
@@ -259,7 +263,7 @@ class AIMintExecutor {
     if (this.monitorInterval) {
       clearInterval(this.monitorInterval);
       this.monitorInterval = null;
-      console.log("🛑 AI Mint Executor stopped");
+      log.info("🛑 AI Mint Executor stopped");
     }
   }
 
@@ -287,7 +291,7 @@ class AIMintExecutor {
 
       if (result.rows.length === 0) return;
 
-      console.log(`\n🔍 Found ${result.rows.length} task(s) to check...`);
+      log.info(`\n🔍 Found ${result.rows.length} task(s) to check...`);
 
       for (const row of result.rows) {
         try {
@@ -315,7 +319,26 @@ class AIMintExecutor {
 
           // If task is pending_payment, check if wallet has sufficient balance
           if (task.status === 'pending_payment') {
-            console.log(`\n💰 Checking pending_payment task ${task.id.slice(0, 8)}...`);
+            log.info(`\n💰 Checking pending_payment task ${task.id.slice(0, 8)}...`);
+            
+            // Check if task has exceeded payment timeout (10 minutes)
+            const taskAge = Date.now() - new Date(row.created_at).getTime();
+            if (taskAge > PAYMENT_TIMEOUT) {
+              log.warn(`   ⏰ Task exceeded payment timeout (${Math.floor(taskAge / 60000)} minutes)`);
+              log.warn(`   ❌ Cancelling task due to timeout...`);
+              
+              await this.pool.query(
+                `UPDATE ai_agent_tasks 
+                 SET status = 'cancelled', 
+                     error_message = $1,
+                     completed_at = NOW()
+                 WHERE id = $2`,
+                [`Payment timeout: No sufficient balance received within ${PAYMENT_TIMEOUT / 60000} minutes`, task.id]
+              );
+              
+              log.info(`   ✅ Task cancelled successfully`);
+              continue;
+            }
             
             // Update wallet balance from chain
             const currentBalance = await this.publicClient.readContract({
@@ -325,8 +348,9 @@ class AIMintExecutor {
               args: [wallet.agentAddress as `0x${string}`],
             });
 
-            console.log(`   Agent wallet balance: ${formatUnits(currentBalance, 6)} USDC`);
-            console.log(`   Required: ${formatUnits(task.totalCost, 6)} USDC`);
+            log.debug(`   Agent wallet balance: ${formatUnits(currentBalance, 6)} USDC`);
+            log.debug(`   Required: ${formatUnits(task.totalCost, 6)} USDC`);
+            log.debug(`   Task age: ${Math.floor(taskAge / 60000)}m ${Math.floor((taskAge % 60000) / 1000)}s / ${PAYMENT_TIMEOUT / 60000}m timeout`);
 
             // Update database balance
             await this.pool.query(
@@ -340,7 +364,7 @@ class AIMintExecutor {
 
             // If sufficient balance, auto-fund the task
             if (currentBalance >= task.totalCost) {
-              console.log(`   ✅ Sufficient balance! Auto-funding task...`);
+              log.info(`   ✅ Sufficient balance! Auto-funding task...`);
               
               await this.pool.query(
                 `UPDATE ai_agent_tasks 
@@ -350,9 +374,9 @@ class AIMintExecutor {
               );
 
               task.status = 'funded';
-              console.log(`   ✅ Task auto-funded successfully`);
+              log.success(`   ✅ Task auto-funded successfully`);
             } else {
-              console.log(`   ⏳ Insufficient balance, skipping...`);
+              log.debug(`   ⏳ Insufficient balance, will check again...`);
               continue;
             }
           }
@@ -365,11 +389,11 @@ class AIMintExecutor {
           // Wait between tasks to avoid spam
           await sleep(1000);
         } catch (error: any) {
-          console.error(`   ❌ Error processing task:`, error.message);
+          log.error(`   ❌ Error processing task:`, error.message);
         }
       }
     } catch (error: any) {
-      console.error("❌ Monitor error:", error.message);
+      log.error("❌ Monitor error:", error.message);
     } finally {
       this.isProcessing = false;
     }
@@ -378,25 +402,25 @@ class AIMintExecutor {
   private async processTask(task: MintTask, wallet: AgentWallet) {
     const key = task.id;
     if (this.processingTasks.has(key)) {
-      console.log(`   ⏭️  Task ${task.id.slice(0, 8)}: Already processing, skipping...`);
+      log.debug(`   ⏭️  Task ${task.id.slice(0, 8)}: Already processing, skipping...`);
       return;
     }
 
     this.processingTasks.add(key);
 
     try {
-      console.log(`\n╔════════════════════════════════════════════════════════════╗`);
-      console.log(`║  Processing Task: ${task.id.slice(0, 8)}...                           ║`);
-      console.log(`╚════════════════════════════════════════════════════════════╝`);
-      console.log(`   Token: ${task.tokenAddress}`);
-      console.log(`   Quantity: ${task.quantity} (${task.mintsCompleted} completed)`);
-      console.log(`   User Wallet (recipient): ${task.userAddress}`);
-      console.log(`   Agent Wallet (payer): ${wallet.agentAddress}`);
-      console.log(`   Transaction Sender: ${this.aiAgentAccount.address}`);
-      console.log(`   Retry Count: ${task.retryCount}/${MAX_RETRY_COUNT}`);
+      log.info(`\n╔════════════════════════════════════════════════════════════╗`);
+      log.info(`║  Processing Task: ${task.id.slice(0, 8)}...                           ║`);
+      log.info(`╚════════════════════════════════════════════════════════════╝`);
+      log.info(`   Token: ${task.tokenAddress}`);
+      log.info(`   Quantity: ${task.quantity} (${task.mintsCompleted} completed)`);
+      log.info(`   User Wallet (recipient): ${task.userAddress}`);
+      log.info(`   Agent Wallet (payer): ${wallet.agentAddress}`);
+      log.info(`   Transaction Sender: ${this.aiAgentAccount.address}`);
+      log.debug(`   Retry Count: ${task.retryCount}/${MAX_RETRY_COUNT}`);
 
       // Check and update agent wallet USDC balance from chain
-      console.log(`   🔍 Checking agent wallet USDC balance...`);
+      log.debug(`   🔍 Checking agent wallet USDC balance...`);
       const currentUsdcBalance = await this.publicClient.readContract({
         address: this.usdcAddress,
         abi: usdcAbi,
@@ -404,7 +428,7 @@ class AIMintExecutor {
         args: [wallet.agentAddress as `0x${string}`],
       });
 
-      console.log(`   💰 Agent wallet USDC balance: ${formatUnits(currentUsdcBalance, 6)} USDC`);
+      log.info(`   💰 Agent wallet USDC balance: ${formatUnits(currentUsdcBalance, 6)} USDC`);
 
       // Update database with current balance
       await this.pool.query(
@@ -482,20 +506,20 @@ class AIMintExecutor {
         pricePerMint = task.pricePerMint;
       }
 
-      console.log(`   Payment Token: ${paymentToken}`);
-      console.log(`   Price per Mint: ${formatUnits(pricePerMint, 6)} USDC`);
-      console.log(`   Mint Amount: ${formatUnits(mintAmount, 6)} tokens`);
+      log.debug(`   Payment Token: ${paymentToken}`);
+      log.info(`   Price per Mint: ${formatUnits(pricePerMint, 6)} USDC`);
+      log.debug(`   Mint Amount: ${formatUnits(mintAmount, 6)} tokens`);
 
       // Calculate remaining mints
       const remaining = task.quantity - task.mintsCompleted;
-      console.log(`   Remaining: ${remaining} mints`);
+      log.debug(`   Remaining: ${remaining} mints`);
 
       // Check AI Agent Account ETH balance
       const aiAgentEthBalance = await this.publicClient.getBalance({
         address: this.aiAgentAccount.address,
       });
       
-      console.log(`   AI Agent Account ETH: ${formatUnits(aiAgentEthBalance, 18)} ETH`);
+      log.debug(`   AI Agent Account ETH: ${formatUnits(aiAgentEthBalance, 18)} ETH`);
       
       if (aiAgentEthBalance < parseUnits('0.001', 18)) {
         throw new Error(`AI Agent Account ETH balance too low: ${formatUnits(aiAgentEthBalance, 18)} ETH. Need at least 0.001 ETH.`);
@@ -528,13 +552,13 @@ class AIMintExecutor {
 
       while (completed < task.quantity) {
         const batchSize = Math.min(MAX_BATCH_SIZE, task.quantity - completed);
-        console.log(`\n   🎯 Minting batch of ${batchSize}...`);
+        log.mint(`\n   🎯 Minting batch of ${batchSize}...`);
 
         try {
           // Batch mint optimization: authorize total amount and call API once per batch
           const batchTotalCost = pricePerMint * BigInt(batchSize);
           
-          console.log(`   💰 Batch cost: ${formatUnits(batchTotalCost, 6)} USDC (${formatUnits(pricePerMint, 6)} × ${batchSize})`);
+          log.debug(`   💰 Batch cost: ${formatUnits(batchTotalCost, 6)} USDC (${formatUnits(pricePerMint, 6)} × ${batchSize})`);
 
           // 1. Generate EIP-3009 authorization for the entire batch
           const nonce = `0x${crypto.randomBytes(32).toString('hex')}` as `0x${string}`;
@@ -591,11 +615,11 @@ class AIMintExecutor {
             signature,
           };
 
-          console.log(`   🔐 Authorization created for batch, calling API...`);
-          console.log(`   📤 Sending to API:`);
-          console.log(`      - Payer (from): ${authorization.from}`);
-          console.log(`      - Recipient (to): ${task.userAddress}`);
-          console.log(`      - Quantity: ${batchSize}`);
+          log.debug(`   🔐 Authorization created for batch, calling API...`);
+          log.info(`   📤 Sending to API:`);
+          log.info(`      - Payer (from): ${authorization.from}`);
+          log.info(`      - Recipient (to): ${task.userAddress}`);
+          log.info(`      - Quantity: ${batchSize}`);
 
           // 2. Call mint API once with batch quantity (with timeout)
           const controller = new AbortController();
@@ -623,8 +647,8 @@ class AIMintExecutor {
             }
 
             const result: any = await response.json();
-            console.log(`   ✅ Batch of ${batchSize} mints queued successfully`);
-            console.log(`   📋 Queue IDs: ${result.queueIds ? result.queueIds.slice(0, 3).join(', ') + '...' : result.queueId || 'N/A'}`);
+            log.success(`   ✅ Batch of ${batchSize} mints queued successfully`);
+            log.debug(`   📋 Queue IDs: ${result.queueIds ? result.queueIds.slice(0, 3).join(', ') + '...' : result.queueId || 'N/A'}`);
 
             completed += batchSize;
 
@@ -646,7 +670,7 @@ class AIMintExecutor {
             throw fetchError;
           }
         } catch (error: any) {
-          console.error(`   ❌ Batch failed: ${error.message}`);
+          log.error(`   ❌ Batch failed: ${error.message}`);
           
           // If exceeded retry limit, already marked as failed
           if (error.message.includes('Exceeded retry limit')) {
@@ -657,7 +681,7 @@ class AIMintExecutor {
           const newRetryCount = (task.retryCount || 0) + 1;
           
           if (newRetryCount >= MAX_RETRY_COUNT) {
-            console.error(`   🚫 Task exceeded retry limit (${MAX_RETRY_COUNT}). Marking as failed.`);
+            log.error(`   🚫 Task exceeded retry limit (${MAX_RETRY_COUNT}). Marking as failed.`);
             await this.pool.query(
               `UPDATE ai_agent_tasks 
                SET status = 'failed', 
@@ -683,7 +707,7 @@ class AIMintExecutor {
       }
 
       // All mints completed
-      console.log(`\n   🎉 All ${completed} mints completed!`);
+      log.success(`\n   🎉 All ${completed} mints completed!`);
 
       await this.pool.query(
         `UPDATE ai_agent_tasks 
@@ -694,10 +718,10 @@ class AIMintExecutor {
         [completed, task.id]
       );
 
-      console.log(`   ✅ Task completed successfully`);
+      log.success(`   ✅ Task completed successfully`);
 
     } catch (error: any) {
-      console.error(`\n❌ Task processing failed: ${error.message}`);
+      log.error(`\n❌ Task processing failed: ${error.message}`);
       
       await this.pool.query(
         `UPDATE ai_agent_tasks 
@@ -735,7 +759,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("❌ Fatal error:", error);
+  log.error("❌ Fatal error:", error);
   process.exit(1);
 });
 
