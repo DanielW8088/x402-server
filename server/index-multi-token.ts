@@ -526,39 +526,40 @@ async function verifyX402Payment(
       const amount = BigInt(paymentPayload.value || expectedAmount);
       
       // 🛡️ DEFENSE: Check balance and allowance before accepting payment
-      const paymentTokenAddress = paymentRequirements.asset as `0x${string}`;
+      // Use the actual payment token address from database, not hardcoded USDC
+      let actualPaymentTokenAddress: `0x${string}`;
+      if (pool) {
+        const dbToken = await getToken(pool, tokenAddress);
+        if (dbToken) {
+          actualPaymentTokenAddress = dbToken.payment_token_address as `0x${string}`;
+        } else {
+          // Fallback to network default
+          actualPaymentTokenAddress = (network === 'base-sepolia' 
+            ? '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
+            : '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913') as `0x${string}`;
+        }
+      } else {
+        actualPaymentTokenAddress = paymentRequirements.asset as `0x${string}`;
+      }
+      
       const launchToolAddress = paymentRequirements.payTo as `0x${string}`;
       
       try {
-        // Check user's USDC balance
+        // 🛡️ EIP-3009: Only check balance, NOT allowance (signature IS the authorization)
         const balance = await publicClient.readContract({
-          address: paymentTokenAddress,
+          address: actualPaymentTokenAddress,
           abi: parseAbi(['function balanceOf(address) view returns (uint256)']),
           functionName: 'balanceOf',
           args: [payer as `0x${string}`],
         });
         
-        // Check user's allowance to LaunchTool
-        const allowance = await publicClient.readContract({
-          address: paymentTokenAddress,
-          abi: parseAbi(['function allowance(address,address) view returns (uint256)']),
-          functionName: 'allowance',
-          args: [payer as `0x${string}`, launchToolAddress],
-        });
-        
-        console.log(`💰 Balance check - Required: ${amount}, Balance: ${balance}, Allowance: ${allowance}`);
+        console.log(`💰 Balance check for ${actualPaymentTokenAddress}`);
+        console.log(`   Required: ${amount}, Balance: ${balance}`);
         
         if (balance < amount) {
           return {
             valid: false,
             error: `Insufficient balance: have ${balance}, need ${amount}`,
-          };
-        }
-        
-        if (allowance < amount) {
-          return {
-            valid: false,
-            error: `Insufficient allowance: have ${allowance}, need ${amount}`,
           };
         }
       } catch (balanceError: any) {
